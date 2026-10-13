@@ -1,0 +1,23 @@
+# systemd unit for tq-publisher. Installed by the .deb (binary in /usr/bin)
+# and by install.sh (binary in <prefix>/bin, path rewritten on install).
+[Unit]
+Description=tq publisher: camera uplink and teleop for the relay
+Documentation=https://github.com/haffi96/tq/blob/main/docs/install.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=tq
+Group=tq
+# TQ_SHARED_SECRET (or TQ_TOKEN), RUST_LOG.
+EnvironmentFile=-/etc/tq/publisher.env
+ExecStart=/usr/bin/tq-publisher --config /etc/tq/publisher.json
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

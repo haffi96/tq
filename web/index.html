@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tq · teleop over QUIC</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <strong id="title">tq</strong>
+      <span id="role" class="pill"></span>
+      <span id="session" class="pill"></span>
+      <span id="conn" class="pill warn">starting</span>
+      <span id="publisher" class="pill">publisher –</span>
+      <span id="clock" class="pill"></span>
+      <span id="viewers" class="pill"></span>
+      <span id="versions" class="pill"></span>
+    </header>
+
+    <section id="operator" hidden>
+      <div class="row">
+        <span id="claim-status" class="pill">free</span>
+        <button id="claim">Claim</button>
+        <button id="force">Force claim</button>
+        <button id="release">Release</button>
+        <span id="deadman" class="deadman">dead-man: –</span>
+      </div>
+      <div class="row">
+        <span>Drive: hold <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> (20 Hz) · <kbd>Space</kbd> = e-stop (release)</span>
+        <label><input type="checkbox" id="stream" /> stream 20 Hz</label>
+        <button id="once">Send one command</button>
+        <span id="drive" class="pill">throttle 0 steer 0</span>
+      </div>
+      <pre id="teleop-stats"></pre>
+    </section>
+
+    <main id="grid"></main>
+
+    <footer>
+      <pre id="publisher-detail"></pre>
+      <pre id="link"></pre>
+      <pre id="log"></pre>
+    </footer>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

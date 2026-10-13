@@ -1,0 +1,10 @@
+[package]
+name = "tq-media"
+description = "H.264/H.265 elementary stream parsing: NAL framing, access units, SEI timestamps, codec strings"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }

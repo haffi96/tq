@@ -1,0 +1,50 @@
+# Checks: Rust (relay, publisher, libraries), the web app, and the
+# macOS app. Releases are separate workflows, one per component tag.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Default members: everything but tq-app (macOS only).
+      - run: cargo test --locked
+      - name: web/src/protocol.ts mirrors the protocol version
+        run: |
+          rs=$(grep -o 'PROTOCOL: ProtocolVersion = ProtocolVersion { major: [0-9]*, minor: [0-9]* }' crates/tq-proto/src/version.rs | grep -o '[0-9][0-9]*' | paste -sd. -)
+          ts=$(grep -o 'PROTOCOL: ProtocolVersion = { major: [0-9]*, minor: [0-9]* }' web/src/protocol.ts | grep -o '[0-9][0-9]*' | paste -sd. -)
+          echo "tq-proto $rs, web $ts"
+          [ -n "$rs" ] && [ "$rs" = "$ts" ]
+
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run build
+
+  app:
+    # macOS runners cost 10x Linux minutes on private repositories.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95'
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.95 test --locked -p tq-app

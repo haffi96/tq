@@ -1,0 +1,22 @@
+[package]
+name = "tq-transport"
+description = "QUIC/WebTransport plumbing shared by the tq publisher and relay: endpoints, certificates, group streams, GOP cache"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tq-proto = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+quinn = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+web-transport-quinn = { workspace = true }

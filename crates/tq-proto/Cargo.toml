@@ -1,0 +1,15 @@
+[package]
+name = "tq-proto"
+description = "Wire format shared by the tq publisher, relay and (mirrored in TypeScript) the browser player"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+bytes = { workspace = true }
+hmac = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

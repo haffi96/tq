@@ -1,0 +1,22 @@
+[package]
+name = "tq-publisher"
+description = "Vehicle-side publisher: TCP H.264/H.265 camera streams -> QUIC relay, teleop datagrams -> dead-man guarded sink"
+# Released on its own: tags `publisher-vX.Y.Z` (see docs/install.md).
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+build = "../../build/version.rs"
+
+[dependencies]
+tq-media = { workspace = true }
+tq-proto = { workspace = true }
+tq-transport = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }

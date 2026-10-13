@@ -1,0 +1,27 @@
+{
+  "av_id": "robot-01",
+  "relay_url": "https://127.0.0.1:4443",
+  "relay_trust": {
+    "mode": "hash_url",
+    "url": "http://127.0.0.1:8080/api/cert"
+  },
+  "shared_secret": "dev-secret-change-me",
+  "max_lag_ms": 400,
+  "quic": {
+    "congestion": "bbr",
+    "send_window": 1048576,
+    "idle_timeout_ms": 3000
+  },
+  "cameras": [
+    {
+      "id": "front",
+      "label": "Front (H.265 10 fps 2 Mbps)",
+      "source": "127.0.0.1:5004",
+      "codec": "h265",
+      "framing": "length_prefixed",
+      "width": 1280,
+      "height": 720,
+      "fps": 10
+    }
+  ]
+}

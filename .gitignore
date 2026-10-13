@@ -1,0 +1,6 @@
+/target
+/web/node_modules
+/web/dist
+/dev/certs
+/config/*.local.json
+/dist

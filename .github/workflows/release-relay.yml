@@ -1,0 +1,65 @@
+# tq-relay release, from a tag relay-vX.Y.Z (dev/release.sh bump relay
+# X.Y.Z): the container image ghcr.io/<owner>/tq-relay with the web app
+# bundled, and a GitHub release with its notes.
+name: release relay
+
+on:
+  push:
+    tags: ['relay-v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: dev/release.sh check relay "${GITHUB_REF_NAME#relay-v}"
+      - id: v
+        run: |
+          {
+            echo "version=${GITHUB_REF_NAME#relay-v}"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/tq-relay"
+            echo "sha=${GITHUB_SHA::10}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: packaging/relay/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}
+            ${{ steps.v.outputs.image }}:latest
+          build-args: |
+            TQ_GIT_SHA=${{ steps.v.outputs.sha }}
+            VERSION=${{ steps.v.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test
+        run: docker run --rm "${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}" --version
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}"
+          {
+            echo "Image: \`$image\` (web app $(sed -n 's/^  "version": "\(.*\)",/\1/p' web/package.json) bundled)"
+            echo
+            echo '```sh'
+            echo "docker run -d --name tq-relay -p 8080:8080 -p 4443:4443/udp -e TQ_SHARED_SECRET=... $image --hostnames relay.example.com"
+            echo '```'
+            echo
+            dev/release.sh notes relay "$GITHUB_REF_NAME"
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "tq-relay ${{ steps.v.outputs.version }}" --notes-file notes.md --latest=false

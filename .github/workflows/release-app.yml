@@ -1,0 +1,44 @@
+# tq-app release, from a tag app-vX.Y.Z (dev/release.sh bump app X.Y.Z):
+# the .dmg for people, the .zip and SHA256SUMS for the in-app updater.
+name: release app
+
+on:
+  push:
+    tags: ['app-v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_STRIP: debuginfo
+
+jobs:
+  app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: dev/release.sh check app "${GITHUB_REF_NAME#app-v}"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95'
+      - uses: Swatinem/rust-cache@v2
+      # Ad hoc signed; set CODESIGN_IDENTITY (and notarize) once there is a
+      # Developer ID.
+      - run: RUSTUP_TOOLCHAIN=1.95 packaging/app/bundle.sh dist
+      - run: (cd dist && shasum -a 256 -- *.zip *.dmg > SHA256SUMS)
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${GITHUB_REF_NAME#app-v}
+          {
+            echo "Download the .dmg and drag tq-app to Applications. It is not notarized yet: the first time, right-click > Open."
+            echo "Installed apps update themselves (About > Check for updates)."
+            echo
+            dev/release.sh notes app "$GITHUB_REF_NAME"
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "tq-app $v" --notes-file notes.md --latest=false \
+            dist/*.dmg dist/*.zip dist/SHA256SUMS
