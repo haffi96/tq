@@ -49,7 +49,7 @@ jobs:
           packaging/publisher/package.sh "$v" linux-aarch64 target/aarch64-unknown-linux-gnu/release/tq-publisher dist
       - name: Install the .deb on Ubuntu 20.04
         run: |
-          docker run --rm -v "$PWD/dist:/d:ro" ubuntu:20.04 sh -c \
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/d:ro" ubuntu:20.04 sh -c \
             'dpkg -i /d/tq-publisher_*_amd64.deb && tq-publisher --version && id tq && ls -l /etc/tq'
       - uses: actions/upload-artifact@v7
         with:
