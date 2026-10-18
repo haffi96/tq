@@ -1,5 +1,6 @@
 # tq-app release, from a tag app-vX.Y.Z (dev/release.sh bump app X.Y.Z):
-# the .dmg for people, the .zip and SHA256SUMS for the in-app updater.
+# the .dmg for people and the .zip for the in-app updater (macOS), the
+# tarball for both (Linux), and SHA256SUMS over all of them.
 name: release app
 
 on:
@@ -14,12 +15,10 @@ env:
   CARGO_PROFILE_RELEASE_STRIP: debuginfo
 
 jobs:
-  app:
+  macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - run: dev/release.sh check app "${GITHUB_REF_NAME#app-v}"
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -28,17 +27,52 @@ jobs:
       # Ad hoc signed; set CODESIGN_IDENTITY (and notarize) once there is a
       # Developer ID.
       - run: RUSTUP_TOOLCHAIN=1.95 packaging/app/bundle.sh dist
-      - run: (cd dist && shasum -a 256 -- *.zip *.dmg > SHA256SUMS)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-macos
+          path: |
+            dist/*.dmg
+            dist/*.zip
+
+  linux:
+    # Built on 24.04, so it needs glibc 2.39 (Ubuntu 24.04 or newer).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: dev/release.sh check app "${GITHUB_REF_NAME#app-v}"
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95'
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTUP_TOOLCHAIN=1.95 packaging/app/linux.sh dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-linux
+          path: dist/*.tar.gz
+
+  release:
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - run: (cd dist && sha256sum -- * > SHA256SUMS)
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           v=${GITHUB_REF_NAME#app-v}
           {
-            echo "Download the .dmg and drag tq-app to Applications. It is not notarized yet: the first time, right-click > Open."
+            echo "macOS: download the .dmg and drag tq-app to Applications. It is not notarized yet: the first time, right-click > Open."
+            echo "Linux (x86_64, NVIDIA): unpack the .tar.gz and put tq-app somewhere you can write to, such as ~/.local/bin."
             echo "Installed apps update themselves (About > Check for updates)."
             echo
             dev/release.sh notes app "$GITHUB_REF_NAME"
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" --title "tq-app $v" --notes-file notes.md --latest=false \
-            dist/*.dmg dist/*.zip dist/SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --title "tq-app $v" --notes-file notes.md --latest=false dist/*

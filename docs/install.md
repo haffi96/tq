@@ -7,7 +7,7 @@ Each part of tq is versioned and released on its own:
 | Publisher | `crates/tq-publisher/Cargo.toml` | `publisher-vX.Y.Z` | Tarballs for Linux x86_64, Linux aarch64 and macOS arm64, `.deb` files for Linux, `install.sh`, `SHA256SUMS` |
 | Relay | `crates/tq-relay/Cargo.toml` | `relay-vX.Y.Z` | The container image `ghcr.io/haffi96/tq-relay:X.Y.Z`, with the web app inside |
 | Web app | `web/package.json` | none | Nothing on its own. It ships inside the relay image. |
-| Native app | `crates/tq-app/Cargo.toml` | `app-vX.Y.Z` | `.dmg` to install, plus `.zip` and `SHA256SUMS` for the in-app updater |
+| Native app | `crates/tq-app/Cargo.toml` | `app-vX.Y.Z` | macOS: `.dmg` to install, `.zip` for the in-app updater. Linux: `.tar.gz` for both. `SHA256SUMS` over all of them. |
 
 The libraries (`tq-proto`, `tq-transport`, `tq-media`) are not released.
 Each binary includes whatever version of them it was built with.
@@ -220,9 +220,9 @@ different port, change both sides: `-e TQ_QUIC=0.0.0.0:5443 -p 5443:5443/udp`.
 docker build -f packaging/relay/Dockerfile --build-arg TQ_GIT_SHA=$(git rev-parse --short=10 HEAD) -t tq-relay .
 ```
 
-## Native app (tq-app, macOS)
+## Native app (tq-app)
 
-### Installing
+### Installing on macOS
 
 1. Download `tq-app-X.Y.Z-macos-arm64.dmg` from the `app-vX.Y.Z` release:
    `https://github.com/haffi96/tq/releases` (or `gh release download app-v0.2.0 -R haffi96/tq -p '*.dmg'`).
@@ -231,9 +231,28 @@ docker build -f packaging/relay/Dockerfile --build-arg TQ_GIT_SHA=$(git rev-pars
    right-click it and choose **Open**, or run
    `xattr -dr com.apple.quarantine /Applications/tq-app.app`.
 
-Started from Finder, the app gets no command-line flags. It reads its
-settings from `~/Library/Application Support/tq-app/config.json` instead.
-Flags still override the file.
+### Installing on Linux
+
+Needs x86_64, glibc 2.39 or newer (Ubuntu 24.04 and up), and an NVIDIA GPU
+with its driver: video decodes with NVDEC. Other GPUs are not supported yet.
+
+1. Download `tq-app-X.Y.Z-linux-x86_64.tar.gz` from the `app-vX.Y.Z` release
+   (or `gh release download app-v0.2.0 -R haffi96/tq -p '*linux*'`).
+2. Unpack it and put `tq-app` somewhere you can write to, so it can update
+   itself. `~/.local/bin` works:
+
+   ```sh
+   tar -xzf tq-app-*-linux-x86_64.tar.gz
+   install -D tq-app-*-linux-x86_64/tq-app ~/.local/bin/tq-app
+   install -Dm644 tq-app-*-linux-x86_64/tq-app.desktop ~/.local/share/applications/tq-app.desktop   # optional launcher
+   ```
+
+### Settings
+
+Started from Finder or a desktop launcher, the app gets no command-line
+flags. It reads its settings from a file instead; flags still override it:
+- macOS: `~/Library/Application Support/tq-app/config.json`
+- Linux: `$XDG_CONFIG_HOME/tq-app/config.json` (default `~/.config/tq-app/config.json`)
 
 ```json
 {
@@ -261,9 +280,11 @@ The app checks for a newer `app-v*` release when it starts. When one exists:
 - **Check for updates** in the same section checks again at any time.
 
 Installing an update:
-1. Downloads the release `.zip`.
-2. Checks it against `SHA256SUMS`, checks the bundle's version, and verifies
-   its code signature.
+1. Downloads the release archive for this platform (`.zip` on macOS,
+   `.tar.gz` on Linux).
+2. Checks it against `SHA256SUMS`. On macOS it also checks the bundle's
+   version and verifies its code signature. On Linux it runs the new
+   binary's `--version`, which checks the version and that it runs here.
 3. Swaps it for the running app, in place.
 4. Restarts with the same arguments.
 
@@ -271,7 +292,8 @@ Nothing is replaced if any check fails. Two limits:
 - Updating is disabled while you hold the operator claim. The restart drops
   the session, which would trip the vehicle's dead-man switch mid-drive.
 - The app has to be somewhere you can write to, such as `/Applications` for
-  an admin user.
+  an admin user on macOS, or `~/.local/bin` on Linux. A build run from
+  cargo's `target/` does not update itself.
 
 **From a terminal:**
 - `tq-app --check-update` reports whether a newer release exists.
@@ -281,10 +303,11 @@ Nothing is replaced if any check fails. Two limits:
 `TQ_UPDATE_PRERELEASE` override the config file. `TQ_UPDATE_API` exists for
 testing against a mock of the GitHub API.
 
-### Building the .dmg by hand
+### Building the release files by hand
 
 ```sh
-packaging/app/bundle.sh   # → dist/app/tq-app.app, …-macos-arm64.zip, …-macos-arm64.dmg
+packaging/app/bundle.sh   # macOS → dist/app/tq-app.app, …-macos-arm64.zip, …-macos-arm64.dmg
+packaging/app/linux.sh    # Linux → dist/app/tq-app-…-linux-x86_64.tar.gz
 ```
 
 Set `CODESIGN_IDENTITY` to sign with a Developer ID instead of ad hoc.

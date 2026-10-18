@@ -16,7 +16,7 @@ use tq_proto::{now_us, CameraInfo, FrameHeader, FLAG_CAPTURE_FROM_SEI};
 use crate::{
     session::Shared,
     stats::{Win, Window},
-    vt::{self, Decoder, Picture},
+    decode::{self, Decoder, Picture},
 };
 
 /// A frame that waited this long for the decoder is not worth showing: skip
@@ -258,7 +258,7 @@ fn decode_loop(feed: Weak<Feed>, shared: Weak<Shared>, rx: mpsc::Receiver<Msg>) 
         }
 
         if key {
-            match vt::codec_of(&job.codec) {
+            match decode::codec_of(&job.codec) {
                 Ok(codec) if decoder.as_ref().is_some_and(|d| d.codec() == codec) => {}
                 Ok(codec) => decoder = Some(Decoder::new(codec)),
                 Err(e) => {

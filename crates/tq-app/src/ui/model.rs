@@ -175,8 +175,8 @@ impl Model {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let bundle = update::install(&settings, &release, &|s| tracing::info!("update: {s}"))?;
-                    update::relaunch(&bundle)?;
+                    let installed = update::install(&settings, &release, &|s| tracing::info!("update: {s}"))?;
+                    update::relaunch(&installed)?;
                     anyhow::Ok(())
                 })
                 .await;

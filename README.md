@@ -29,7 +29,7 @@ as an alternative to a LiveKit/WebRTC path.
 | `crates/tq-publisher` | Vehicle binary: reads the TCP sources, uplinks to the relay, runs the teleop sink and dead-man. |
 | `crates/tq-relay` | Relay binary: WebTransport for the publisher and browsers, HTTP for the app, `/api/cert` and dev tokens. |
 | `crates/tq-tools` | `tq-impair` (Starlink-like UDP impairment proxy) and `tq-probe` (headless operator/viewer that reports per-hop latency). |
-| `crates/tq-app` | Native macOS operator/viewer app (GPUI + VideoToolbox), replacing `web/`. Not built by a plain `cargo build`. |
+| `crates/tq-app` | Native operator/viewer app (GPUI; VideoToolbox on macOS, NVDEC on Linux), replacing `web/`. Not built by a plain `cargo build`. |
 | `web/` | Browser app in TypeScript, built with bun. `worker.ts` owns WebTransport, WebCodecs and OffscreenCanvas; `main.ts` is the UI. |
 | `config/` | Publisher configs: `publisher.example.json` (H.264 + H.265 test sources), `publisher.prodlike.json` (H.265, 10 fps, 2 Mbps, like production). |
 | `dev/run-local.sh` | Starts the whole stack on one machine. |
@@ -71,13 +71,24 @@ Operator controls:
 - **stream 20 Hz** keeps commands flowing without a key held.
 - `Space` releases the claim, so the vehicle trips immediately.
 
-### Native app (macOS)
+### Native app (macOS, Linux)
 
 `tq-app` is the native operator console. GPUI draws the window, with
 components from [gpui-kit](https://github.com/longbridge/gpui-kit).
-VideoToolbox decodes H.264 and H.265 in hardware into NV12 IOSurfaces, and
-GPUI's `surface()` element composites those without a copy. The protocol
-runs in-process on tokio, using `tq-transport` like `tq-probe` does.
+The protocol runs in-process on tokio, using `tq-transport` like `tq-probe`
+does. H.264 and H.265 decode in hardware:
+- macOS: VideoToolbox decodes into NV12 IOSurfaces, and GPUI's `surface()`
+  element composites those without a copy.
+- Linux: NVDEC decodes on an NVIDIA GPU (the driver's libraries are loaded
+  at runtime; no CUDA toolkit needed). GPUI has no video surface on Linux,
+  so each frame is copied to the host, converted to BGRA and drawn as an
+  image. Other GPUs (VA-API) are not supported yet.
+
+On Linux, GPUI needs these to build (Ubuntu):
+
+```bash
+sudo apt install libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+```
 
 gpui-kit pins a `gpui-pre` snapshot that needs Rust 1.95 or newer:
 
@@ -112,9 +123,10 @@ frame.
 It reads the certificate hash and the QUIC port from `--relay-http`
 (default `http://127.0.0.1:8080`). For the token it takes `--token`;
 otherwise it signs one with `TQ_SHARED_SECRET` or asks a `--dev` relay.
-Started from Finder (the `.dmg` build), it takes the same settings from
-`~/Library/Application Support/tq-app/config.json`, and it updates itself
-from GitHub Releases ([docs/install.md](docs/install.md#native-app-tq-app-macos)).
+Started from Finder (the `.dmg` build) or a desktop launcher, it takes the
+same settings from `~/Library/Application Support/tq-app/config.json`
+(macOS) or `~/.config/tq-app/config.json` (Linux), and it updates itself
+from GitHub Releases ([docs/install.md](docs/install.md#native-app-tq-app)).
 The operator controls match the web page: Claim / Force claim / Release,
 hold `W`/`A`/`S`/`D`, and `Space` for e-stop.
 
