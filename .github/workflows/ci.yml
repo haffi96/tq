@@ -38,6 +38,17 @@ jobs:
       - run: bun run typecheck
       - run: bun run build
 
+  app-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95'
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.95 test --locked -p tq-app
+
   app:
     # macOS runners cost 10x Linux minutes on private repositories.
     runs-on: macos-15

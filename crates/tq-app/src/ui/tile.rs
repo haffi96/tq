@@ -14,11 +14,12 @@ use gpui_kit::{
     },
     div, hsla,
     prelude::*,
-    px, surface, AnyView, App, Context, Entity, ObjectFit, SharedString, StyleRefinement, Window,
+    px, AnyView, App, Context, Entity, ObjectFit, SharedString, StyleRefinement, Window,
 };
 
 use super::{model::Model, widgets::*};
 use crate::{
+    decode::Picture,
     feed::{Feed, Stats},
     session::Shared,
 };
@@ -26,9 +27,30 @@ use crate::{
 /// The newest picture of one camera.
 pub struct Video {
     feed: Arc<Feed>,
+    /// The image in the window's sprite atlas. Each frame is a new image;
+    /// the one it replaces has to leave the atlas or the atlas grows forever.
+    #[cfg(target_os = "linux")]
+    shown: Option<Arc<gpui_kit::RenderImage>>,
 }
 
 impl Video {
+    pub fn new(feed: Arc<Feed>, cx: &mut Context<Self>) -> Self {
+        #[cfg(target_os = "linux")]
+        cx.on_release(|this, cx| {
+            if let Some(image) = this.shown.take() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
+        #[cfg(not(target_os = "linux"))]
+        let _ = cx;
+        Self {
+            feed,
+            #[cfg(target_os = "linux")]
+            shown: None,
+        }
+    }
+
     /// A new picture: re-render if this camera has one the UI has not
     /// painted yet.
     pub fn on_frame(&mut self, cx: &mut Context<Self>) {
@@ -39,15 +61,34 @@ impl Video {
 }
 
 impl Render for Video {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let mut video = div().size_full();
         if let Some(picture) = self.feed.picture() {
             let painted = self.feed.clone();
             video = video
-                .child(surface(picture.0).object_fit(ObjectFit::Contain).size_full())
+                .child(self.picture(picture, window))
                 .child(canvas(|_, _, _| {}, move |_, _, _, _| painted.mark_painted()).absolute());
         }
         video
+    }
+}
+
+impl Video {
+    #[cfg(target_os = "macos")]
+    fn picture(&mut self, picture: Picture, _: &mut Window) -> impl IntoElement {
+        gpui_kit::surface(picture.0).object_fit(ObjectFit::Contain).size_full()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn picture(&mut self, picture: Picture, window: &mut Window) -> impl IntoElement {
+        use gpui_kit::StyledImage as _;
+        let image = picture.0;
+        if self.shown.as_ref().is_none_or(|shown| shown.id != image.id) {
+            if let Some(old) = self.shown.replace(image.clone()) {
+                let _ = window.drop_image(old);
+            }
+        }
+        gpui_kit::img(image).object_fit(ObjectFit::Contain).size_full()
     }
 }
 
@@ -246,7 +287,7 @@ impl Grid {
             self.tiles = feeds
                 .iter()
                 .map(|feed| {
-                    let video = cx.new(|_| Video { feed: feed.clone() });
+                    let video = cx.new(|cx| Video::new(feed.clone(), cx));
                     let hud = cx.new(|_| Hud {
                         shared: shared.clone(),
                         feed: feed.clone(),

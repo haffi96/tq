@@ -15,7 +15,7 @@
 
 use std::{ffi::c_void, ptr, ptr::NonNull};
 
-use anyhow::{bail, Context};
+use anyhow::bail;
 use core_foundation::{
     base::{kCFAllocatorDefault, CFAllocatorRef, CFRelease, CFType, CFTypeRef, OSStatus, TCFType},
     boolean::CFBoolean,
@@ -440,17 +440,6 @@ pub fn split_annexb(data: &[u8]) -> impl Iterator<Item = &[u8]> {
         }
     }
     nals.into_iter()
-}
-
-/// Codec of a group from its WebCodecs codec string.
-pub fn codec_of(codec_string: &str) -> anyhow::Result<Codec> {
-    if codec_string.starts_with("avc1") || codec_string.starts_with("avc3") {
-        Ok(Codec::H264)
-    } else if codec_string.starts_with("hev1") || codec_string.starts_with("hvc1") {
-        Ok(Codec::H265)
-    } else {
-        Err(anyhow::anyhow!("unsupported codec {codec_string}")).context("codec")
-    }
 }
 
 #[cfg(test)]

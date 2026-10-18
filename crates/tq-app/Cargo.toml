@@ -34,3 +34,13 @@ core-foundation = "0.10"
 # type gpui's surface() element takes.
 objc2-core-foundation = "0.3.2"
 objc2-core-video = "0.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# NVDEC through the NVIDIA driver, dlopen'd at runtime (libcuda through
+# cudarc, libnvcuvid through moq-nvenc's cuvid table): the build needs no
+# CUDA toolkit or driver.
+cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
+moq-nvenc = "0.1.2"
+libloading = "0.9"
+# gpui's RenderImage takes `image` frames; same major version as gpui.
+image = { version = "0.25", default-features = false }

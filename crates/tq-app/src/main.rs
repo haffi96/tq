@@ -1,24 +1,29 @@
 //! tq-app: native operator / viewer for the tq relay, replacing the web
-//! page. GPUI draws the window; VideoToolbox decodes in hardware into
-//! CVPixelBuffers that GPUI composites without a copy; the tq protocol runs
-//! in-process on tokio.
+//! page. GPUI draws the window; the tq protocol runs in-process on tokio.
+//! On macOS VideoToolbox decodes in hardware into CVPixelBuffers that GPUI
+//! composites without a copy; on Linux NVDEC decodes and the frames are
+//! drawn as images.
 //!
 //! ```text
 //! tq-app --role operator --av robot-01      # relay on http://127.0.0.1:8080
 //! ```
 //!
-//! Started from Finder it reads `~/Library/Application Support/tq-app/config.json`
-//! ([`config`]); flags override the file.
+//! Started without flags (from Finder, or a desktop launcher) it reads its
+//! settings file ([`config`]); flags override the file.
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("tq-app decodes with VideoToolbox and only builds on macOS for now");
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("tq-app decodes with VideoToolbox (macOS) or NVDEC (Linux) and only builds there");
 
 mod config;
+mod decode;
 mod feed;
+#[cfg(target_os = "linux")]
+mod nvdec;
 mod session;
 mod stats;
 mod ui;
 mod update;
+#[cfg(target_os = "macos")]
 mod vt;
 
 use std::path::PathBuf;
@@ -36,7 +41,8 @@ actions!(tq_app, [Quit]);
 #[derive(Parser)]
 #[command(about = "Native tq operator / viewer")]
 struct Args {
-    /// Settings file; default ~/Library/Application Support/tq-app/config.json.
+    /// Settings file; default ~/Library/Application Support/tq-app/config.json
+    /// on macOS, ~/.config/tq-app/config.json on Linux.
     #[arg(long)]
     config: Option<PathBuf>,
     /// Relay HTTP endpoint (certificate hash, QUIC port, dev tokens).
@@ -64,7 +70,7 @@ struct Args {
     /// Print whether a newer release exists, then exit.
     #[arg(long)]
     check_update: bool,
-    /// Install the newest release over this bundle, then exit (no restart).
+    /// Install the newest release over this one, then exit (no restart).
     #[arg(long)]
     install_update: bool,
 }
@@ -117,7 +123,7 @@ fn main() -> anyhow::Result<()> {
 
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
@@ -156,11 +162,11 @@ fn update_cli(updates: &update::Settings, install: bool) -> anyhow::Result<()> {
         release.version, release.page
     );
     if install {
-        let bundle = update::install(updates, &release, &|s| println!("{s}…"))?;
+        let installed = update::install(updates, &release, &|s| println!("{s}…"))?;
         println!(
             "installed {} at {}; start it again to use it",
             release.version,
-            bundle.display()
+            installed.display()
         );
     }
     Ok(())

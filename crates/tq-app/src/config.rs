@@ -1,7 +1,8 @@
-//! Settings file, for the app started from Finder (no flags, no shell
-//! environment). Command-line flags override it.
+//! Settings file, for the app started from Finder or a desktop launcher (no
+//! flags, no shell environment). Command-line flags override it.
 //!
-//! `~/Library/Application Support/tq-app/config.json`:
+//! `~/Library/Application Support/tq-app/config.json` on macOS,
+//! `$XDG_CONFIG_HOME/tq-app/config.json` (default `~/.config`) on Linux:
 //!
 //! ```json
 //! {
@@ -45,9 +46,19 @@ pub struct Update {
     pub prerelease: bool,
 }
 
+#[cfg(target_os = "macos")]
 pub fn default_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(Path::new(&home).join("Library/Application Support/tq-app/config.json"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn default_path() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => Path::new(&std::env::var_os("HOME")?).join(".config"),
+    };
+    Some(base.join("tq-app/config.json"))
 }
 
 impl File {
