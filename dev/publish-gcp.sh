@@ -25,4 +25,17 @@ sleep 2
 
 ./target/release/tq-publisher --config "$CONFIG" &
 pids+=($!)
-wait
+
+# Stop everything when any one exits, with its status. (No `wait -n`: macOS
+# ships bash 3.2.)
+while :; do
+  for pid in "${pids[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      status=0
+      wait "$pid" || status=$?
+      echo "process $pid exited with status $status; stopping the rest" >&2
+      exit "$status"
+    fi
+  done
+  sleep 1
+done

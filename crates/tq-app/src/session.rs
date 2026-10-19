@@ -526,6 +526,8 @@ async fn http_get_json<T: serde::de::DeserializeOwned>(url: &url::Url) -> anyhow
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, request: &str) -> anyhow::Result<Vec<u8>> {
         s.write_all(request.as_bytes()).await?;
+        // A TLS stream may still hold the encrypted request until flushed.
+        s.flush().await?;
         let mut body = Vec::new();
         match s.read_to_end(&mut body).await {
             Ok(_) => {}
@@ -547,15 +549,16 @@ async fn http_get_json<T: serde::de::DeserializeOwned>(url: &url::Url) -> anyhow
             host.to_string()
         }
     );
-    let tcp = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(&addr))
-        .await
-        .context("timeout")??;
     let path = match url.query() {
         Some(q) => format!("{}?{q}", url.path()),
         None => url.path().to_string(),
     };
     let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n");
+    // 5 s for the whole request, of which at most 3 s to connect.
     let response = tokio::time::timeout(Duration::from_secs(5), async {
+        let tcp = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(&addr))
+            .await
+            .context("connect timeout")??;
         match url.scheme() {
             "https" => {
                 let tls = tokio_rustls::TlsConnector::from(Arc::new(tq_transport::quic::https_client_config()?));
