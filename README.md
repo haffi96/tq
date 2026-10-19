@@ -132,6 +132,17 @@ same settings from `~/Library/Application Support/tq-app/config.json`
 (macOS) or `$XDG_CONFIG_HOME/tq-app/config.json` (default
 `~/.config/tq-app/config.json`) on Linux, and it updates itself
 from GitHub Releases ([docs/install.md](docs/install.md#native-app-tq-app)).
+
+The `.dmg` app is signed ad hoc and not notarized, so macOS blocks the first
+launch ("Apple could not verify tq-app…"), and on macOS 15 or newer
+right-click → **Open** doesn't get past it. After dragging it to
+Applications, either open it once, click **Done**, then click **Open Anyway**
+under **System Settings → Privacy & Security**, or run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/tq-app.app
+```
+
 The operator controls match the web page: Claim / Force claim / Release,
 hold `W`/`A`/`S`/`D`, and `Space` for e-stop.
 

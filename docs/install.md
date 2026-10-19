@@ -241,9 +241,14 @@ docker build -f packaging/relay/Dockerfile --build-arg TQ_GIT_SHA=$(git rev-pars
 1. Download `tq-app-X.Y.Z-macos-arm64.dmg` from the `app-vX.Y.Z` release:
    `https://github.com/haffi96/tq/releases` (or `gh release download app-v0.2.0 -R haffi96/tq -p '*.dmg'`).
 2. Drag **tq-app** to Applications.
-3. The app is signed ad hoc and not notarized yet. The first time, either
-   right-click it and choose **Open**, or run
-   `xattr -dr com.apple.quarantine /Applications/tq-app.app`.
+3. The app is signed ad hoc and not notarized yet, so macOS blocks it the
+   first time ("Apple could not verify tq-app…"). Right-click → **Open** no
+   longer gets past this on macOS 15 (Sequoia) or newer. Either:
+   - open it once, click **Done**, then go to **System Settings → Privacy &
+     Security**, scroll down, click **Open Anyway** and confirm, or
+   - run `xattr -dr com.apple.quarantine /Applications/tq-app.app`.
+
+   Updates installed from inside the app don't need this again.
 
 ### Installing on Linux
 
