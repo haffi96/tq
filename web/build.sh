@@ -16,7 +16,7 @@ if [[ -z "$SHA" ]]; then
   fi
 fi
 rm -rf dist && mkdir -p dist
-cp index.html styles.css dist/
+cp -R index.html styles.css favicon.ico icons dist/
 exec bun build src/main.ts src/worker.ts --outdir dist --target browser --sourcemap=linked \
   --define "TQ_WEB_VERSION=\"$VERSION\"" --define "TQ_GIT_SHA=\"$SHA\"" \
   --define "TQ_RELAY_HTTP=\"${TQ_RELAY_HTTP:-}\"" "$@"

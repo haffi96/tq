@@ -24,6 +24,7 @@ APP="$OUT/tq-app.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/tq-app "$APP/Contents/MacOS/tq-app"
+cp packaging/app/tq-app.icns "$APP/Contents/Resources/tq-app.icns"
 cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,6 +34,7 @@ cat >"$APP/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>tq</string>
   <key>CFBundleIdentifier</key><string>dev.tq.app</string>
   <key>CFBundleExecutable</key><string>tq-app</string>
+  <key>CFBundleIconFile</key><string>tq-app</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>

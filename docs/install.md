@@ -259,6 +259,7 @@ with its driver: video decodes with NVDEC. Other GPUs are not supported yet.
    tar -xzf tq-app-*-linux-x86_64.tar.gz
    install -D tq-app-*-linux-x86_64/tq-app ~/.local/bin/tq-app
    install -Dm644 tq-app-*-linux-x86_64/tq-app.desktop ~/.local/share/applications/tq-app.desktop   # optional launcher
+   install -Dm644 tq-app-*-linux-x86_64/tq-app.png ~/.local/share/icons/hicolor/512x512/apps/tq-app.png   # its icon
    ```
 
 ### Settings
