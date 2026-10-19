@@ -131,6 +131,10 @@ fn main() -> anyhow::Result<()> {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // Matches tq-app.desktop, so the launcher's icon is the window's.
+                app_id: Some("tq-app".into()),
+                #[cfg(target_os = "linux")]
+                icon: window_icon(),
                 ..TitleBar::window_options()
             },
             cx,
@@ -171,4 +175,17 @@ fn update_cli(updates: &update::Settings, install: bool) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// The window icon on X11 (Wayland takes it from the .desktop entry).
+#[cfg(target_os = "linux")]
+fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    let png = include_bytes!("../assets/tq-app.png");
+    match image::load_from_memory_with_format(png, image::ImageFormat::Png) {
+        Ok(icon) => Some(std::sync::Arc::new(icon.into_rgba8())),
+        Err(e) => {
+            tracing::warn!("window icon: {e}");
+            None
+        }
+    }
 }
