@@ -6,7 +6,7 @@
 //!
 //! ```json
 //! {
-//!   "relay_http": "http://relay.example:8080",
+//!   "relay_http": "https://tq-relay-1.haffi.dev",
 //!   "av": "robot-01",
 //!   "role": "operator",
 //!   "secret": "…"

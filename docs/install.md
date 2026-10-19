@@ -270,7 +270,7 @@ flags. It reads its settings from a file instead; flags still override it:
 
 ```json
 {
-  "relay_http": "https://relay.example.com:8080",
+  "relay_http": "https://tq-relay-1.haffi.dev",
   "av": "robot-01",
   "role": "operator",
   "secret": "…"
@@ -279,7 +279,7 @@ flags. It reads its settings from a file instead; flags still override it:
 
 | Key | Meaning |
 | --- | --- |
-| `relay_http` | Relay HTTP base. Default `http://127.0.0.1:8080`. |
+| `relay_http` | Relay HTTP base. Default `http://127.0.0.1:8080`. Use `https://` for a relay with a real certificate (checked against the system CA roots), and `http://` for a self-signed or dev relay. |
 | `relay` | QUIC `host:port`. Default: the HTTP host and the relay's QUIC port. |
 | `av`, `role` | Default `robot-01`, `viewer`. |
 | `token` or `secret` | A session token, or the shared secret to sign one. Without either, the app asks a `--dev` relay for a token. |

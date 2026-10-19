@@ -16,10 +16,12 @@ terraform {
     }
   }
 
-  # State is local for now (gitignored). To share it, create a bucket and
-  # switch to:
-  #   backend "gcs" { bucket = "<project>-tfstate"  prefix = "tq/gcp" }
-  # then `terraform init -migrate-state`.
+  # State holds the generated shared secret and the Cloudflare token: keep it
+  # in this private, versioned bucket (made by hand, see README), never local.
+  backend "gcs" {
+    bucket = "playground-442622-tq-tfstate"
+    prefix = "tq/gcp"
+  }
 }
 
 provider "google" {

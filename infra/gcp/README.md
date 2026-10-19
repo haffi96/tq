@@ -34,6 +34,23 @@ works as well as `https://tq.haffi.dev/?av=…`.
 - The relay image: `ghcr.io/haffi96/tq-relay:0.2.0` (or newer). It needs
   `--http-tls` and `--cors-origins`.
 
+## State
+
+State is in `gs://playground-442622-tq-tfstate` under `tq/gcp/`, a private,
+versioned bucket in London. It holds the generated shared secret and the
+Cloudflare token, so never copy it locally or commit it. The bucket was
+created by hand, because Terraform can't create the bucket that holds its own state:
+
+```sh
+gcloud storage buckets create gs://playground-442622-tq-tfstate --location europe-west2 \
+  --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets update gs://playground-442622-tq-tfstate --versioning
+```
+
+To roll back a bad write, list the old versions with
+`gcloud storage ls -a gs://playground-442622-tq-tfstate/tq/gcp/` and copy one
+back.
+
 ## Deploy
 
 ```sh
@@ -80,6 +97,21 @@ Publisher config:
 "relay_url": "https://tq-relay-1.haffi.dev:443",
 "relay_trust": { "mode": "system_roots" },
 "shared_secret": "<terraform output -raw shared_secret>"
+```
+
+For a test feed from this machine, `dev/publish-gcp.sh` runs the two test
+sources (H.264 and H.265) and a publisher using `config/publisher.gcp.json`.
+It reads the secret from the Terraform state.
+
+tq-app (0.3.0 or newer) settings file:
+
+```json
+{
+  "relay_http": "https://tq-relay-1.haffi.dev",
+  "av": "robot-01",
+  "role": "operator",
+  "secret": "<terraform output -raw shared_secret>"
+}
 ```
 
 ## Operating
