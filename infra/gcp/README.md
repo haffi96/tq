@@ -28,8 +28,9 @@ works as well as `https://tq.haffi.dev/?av=…`.
 - `gcloud` and `terraform` (1.6 or newer)
 - A GCP project with billing enabled. `gcloud auth application-default login`
   gives Terraform your credentials.
-- A Cloudflare API token with **Zone → DNS → Edit** on `haffi.dev`. Terraform
-  uses it for the A record. certbot on the VM uses it for DNS-01.
+- A Cloudflare API token on `haffi.dev` with **Zone → Zone → Read** and
+  **Zone → DNS → Edit**. Terraform needs Read to look the zone up by name, and
+  Edit to create the A record. certbot on the VM uses it for DNS-01.
 - The relay image: `ghcr.io/haffi96/tq-relay:0.2.0` (or newer). It needs
   `--http-tls` and `--cors-origins`.
 

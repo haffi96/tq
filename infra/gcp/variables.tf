@@ -48,7 +48,7 @@ variable "cloudflare_zone" {
 }
 
 variable "cloudflare_api_token" {
-  description = "Token with Zone > DNS > Edit on the zone. Used by Terraform for the A record, and by certbot on the VM for DNS-01."
+  description = "Token with Zone > Zone > Read and Zone > DNS > Edit on the zone. Terraform looks the zone up by name and creates the A record; certbot on the VM uses it for DNS-01."
   type        = string
   sensitive   = true
 }

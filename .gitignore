@@ -8,3 +8,4 @@
 /infra/gcp/.terraform
 /infra/gcp/*.tfstate*
 /infra/gcp/terraform.tfvars
+/infra/gcp/tfplan
