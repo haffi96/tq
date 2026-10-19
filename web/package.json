@@ -6,9 +6,11 @@
   "scripts": {
     "build": "./build.sh",
     "watch": "./build.sh --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy": "TQ_RELAY_HTTP=${TQ_RELAY_HTTP:-https://tq-relay-1.haffi.dev} ./build.sh && wrangler deploy"
   },
   "devDependencies": {
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "wrangler": "^4.151.1"
   }
 }

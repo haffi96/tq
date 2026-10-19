@@ -39,6 +39,15 @@ struct Args {
     /// HTTP listen address (browser app, /api/cert, /api/dev/token).
     #[arg(long, env = "TQ_HTTP", default_value = "[::]:8080")]
     http: SocketAddr,
+    /// Serve HTTP over TLS with --cert/--key. Needed when the page is
+    /// served from another origin over https (WebTransport needs a secure
+    /// context, and an https page cannot fetch http).
+    #[arg(long, env = "TQ_HTTP_TLS", requires = "cert")]
+    http_tls: bool,
+    /// Origins allowed to call /api/* from another site, e.g.
+    /// `https://tq.example.com`. Empty: same origin only.
+    #[arg(long, env = "TQ_CORS_ORIGINS", value_delimiter = ',')]
+    cors_origins: Vec<String>,
     /// Shared secret for tokens.
     #[arg(long, env = "TQ_SHARED_SECRET", hide_env_values = true)]
     secret: String,
@@ -174,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
         next_conn: AtomicU64::new(1),
     });
 
+    let relay_for_web = relay.clone();
     if args.dev {
         let http = args.http;
         let port = http.port();
@@ -181,7 +191,19 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("operator UI: http://localhost:{port}/?av=robot-01&role=operator");
         tracing::info!("viewer UI:   http://localhost:{port}/?av=robot-01&role=viewer");
     }
-    tokio::spawn(web::serve(relay.clone(), args.http, args.web_dir.clone()));
+    let tls = args.http_tls.then(|| web::tls_config(&cert)).transpose()?;
+    let web_cfg = web::Config {
+        addr: args.http,
+        web_dir: args.web_dir.clone(),
+        tls,
+        cors_origins: args.cors_origins.clone(),
+    };
+    tokio::spawn(async move {
+        if let Err(e) = web::serve(relay_for_web, web_cfg).await {
+            tracing::error!(error = format!("{e:#}"), "HTTP server failed");
+            std::process::exit(1);
+        }
+    });
 
     loop {
         tokio::select! {
@@ -194,13 +216,29 @@ async fn main() -> anyhow::Result<()> {
                     }
                 });
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown_signal() => {
                 tracing::info!("shutting down");
                 break;
             }
         }
     }
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM from `docker stop` / systemd. As PID 1 in a container
+/// the relay would otherwise ignore SIGTERM and be killed after the timeout.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// `--version` with the commit and protocol: `0.1.0 (a1b2c3d4e5) protocol 1.1`.

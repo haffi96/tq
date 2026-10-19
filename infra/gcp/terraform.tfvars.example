@@ -1,0 +1,6 @@
+# cp terraform.tfvars.example terraform.tfvars (gitignored)
+project_id = "your-gcp-project"
+# Or leave this out and export TF_VAR_cloudflare_api_token.
+cloudflare_api_token = "..."
+# acme_email   = "you@example.com"
+# acme_staging = true   # while testing

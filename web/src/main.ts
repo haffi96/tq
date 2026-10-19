@@ -6,6 +6,9 @@ import { type BuildInfo, type CameraInfo, type Control, type RelayState, type Ro
 import { WEB_BUILD } from './version';
 import type { CameraStats, FromWorker, ToWorker, Window } from './worker';
 
+/** Set by build.sh from TQ_RELAY_HTTP; empty when the relay serves the page. */
+declare const TQ_RELAY_HTTP: string;
+
 const params = new URLSearchParams(location.search);
 const av = params.get('av') ?? 'robot-01';
 const role: Role = params.get('role') === 'operator' ? 'operator' : 'viewer';
@@ -293,7 +296,10 @@ async function start() {
   $('role').textContent = role;
   if (role === 'operator') setupOperator();
   renderVersions();
-  const info = (await (await fetch('/api/info')).json()) as {
+  // The relay's HTTP base: ?relay_http=, else the one baked in at build
+  // time (TQ_RELAY_HTTP), else this page's origin (the relay serves it).
+  const relayHttp = new URL(params.get('relay_http') || TQ_RELAY_HTTP || location.origin);
+  const info = (await (await fetch(new URL('/api/info', relayHttp))).json()) as {
     quic_port: number;
     sha256: string;
     self_signed: boolean;
@@ -302,11 +308,12 @@ async function start() {
   if (compat(info.build) === 'incompatible') throw new Error(`incompatible relay: ${mismatch('relay', info.build)}`);
   let token = params.get('token');
   if (!token) {
-    const r = await fetch(`/api/dev/token?role=${role}&av=${encodeURIComponent(av)}`);
+    const r = await fetch(new URL(`/api/dev/token?role=${role}&av=${encodeURIComponent(av)}`, relayHttp));
     if (!r.ok) throw new Error(`no ?token= and the relay does not mint dev tokens (${r.status})`);
     token = ((await r.json()) as { token: string }).token;
   }
-  const host = params.get('relay') ?? `${location.hostname.includes(':') ? `[${location.hostname}]` : location.hostname}:${info.quic_port}`;
+  // URL.hostname keeps the brackets around an IPv6 address.
+  const host = params.get('relay') ?? `${relayHttp.hostname}:${info.quic_port}`;
   const url = `https://${host}/v1/session/${encodeURIComponent(av)}?token=${encodeURIComponent(token)}`;
   if (!('WebTransport' in window)) throw new Error('this browser has no WebTransport');
   if (!('VideoDecoder' in window)) throw new Error('this browser has no WebCodecs VideoDecoder');

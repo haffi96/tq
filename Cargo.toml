@@ -25,6 +25,7 @@ tq-transport = { path = "crates/tq-transport" }
 
 anyhow = "1"
 axum = "0.8"
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -43,7 +44,7 @@ sha2 = "0.10"
 thiserror = "2"
 time = "0.3"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["fs", "set-header"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
