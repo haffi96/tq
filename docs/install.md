@@ -200,6 +200,8 @@ docker run -d --name tq-relay --restart unless-stopped \
 | `TQ_HTTP` | `0.0.0.0:8080`, the web app, `/api/*` |
 | `TQ_WEB_DIR` | `/usr/share/tq/web` |
 | `TQ_SHARED_SECRET` | required |
+| `TQ_HTTP_TLS` | off. `true` serves HTTP over TLS with `--cert`/`--key` |
+| `TQ_CORS_ORIGINS` | empty. Comma-separated origins allowed to call `/api/*`, e.g. `https://tq.haffi.dev` |
 
 Publish the QUIC port on the same number it uses inside the container
 (`-p 4443:4443/udp`). Apps and the web page read the port from
@@ -212,7 +214,19 @@ different port, change both sides: `-e TQ_QUIC=0.0.0.0:5443 -p 5443:5443/udp`.
 - For a real certificate, mount it and pass both flags:
   `-v /etc/letsencrypt/live/relay:/certs:ro … --cert /certs/fullchain.pem --key /certs/privkey.pem`.
 
-**Upgrading:** pull the new tag, then recreate the container.
+**Web app on another origin:** a page served over https (for example from
+Cloudflare, `web/wrangler.jsonc`) can only call a relay that also speaks
+https, and WebTransport needs the page to be a secure context. Run the relay
+with a real certificate, `TQ_HTTP_TLS=true` and
+`TQ_CORS_ORIGINS=https://<page origin>`. Build the page with
+`TQ_RELAY_HTTP=https://<relay>` (`bun run deploy` in `web/` does), or pass
+`?relay_http=` in its URL.
+
+**GCP:** `infra/gcp/` is Terraform for one relay VM with a Let's Encrypt
+certificate and a Cloudflare DNS record. See its README.
+
+**Upgrading:** pull the new tag, then recreate the container. The relay
+exits on SIGTERM (`docker stop`) and closes its sessions.
 
 **Building locally:**
 

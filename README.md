@@ -36,6 +36,7 @@ as an alternative to a LiveKit/WebRTC path.
 | `dev/release.sh` | Bumps a component's version; CI uses it to check tags and write release notes. |
 | `build/version.rs` | Build script shared by the binaries: stamps the git commit into `--version` and the handshake. |
 | `packaging/` | Publisher tarball/`.deb`/`install.sh` and service files, the relay's Dockerfile, the app's `.dmg` bundler. |
+| `infra/gcp/` | Terraform for the relay on GCP (London VM, Let's Encrypt, Cloudflare DNS). The web app deploys to Cloudflare from `web/` with wrangler. |
 | `docs/install.md` | Installing, upgrading and releasing each component; versions and protocol compatibility. |
 
 ## Versions and releases

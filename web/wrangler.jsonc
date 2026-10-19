@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // The browser app as static assets on Cloudflare at tq.haffi.dev. It talks
+  // to the relay at TQ_RELAY_HTTP, baked in by `bun run deploy`.
+  "name": "tq-web",
+  "account_id": "7b90172cb4dfa9ecd9b6582bce068917",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "routes": [
+    {
+      "pattern": "tq.haffi.dev",
+      "custom_domain": true
+    }
+  ],
+  "workers_dev": false
+}

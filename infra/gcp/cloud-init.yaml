@@ -1,0 +1,160 @@
+#cloud-config
+# tq-relay on Container-Optimized OS. A Terraform template (templatefile):
+# a doubled dollar is a literal shell dollar-brace, a single one is filled
+# in by Terraform.
+#
+# Boot order (systemd):
+#   tq-secrets  Secret Manager -> /run/tq (tmpfs)
+#   tq-cert     certbot (DNS-01 via Cloudflare) -> /var/lib/tq/certs
+#   tq-relay    docker run --network host, QUIC on udp/443, HTTPS on tcp/443
+# tq-cert-renew.timer re-runs tq-cert daily and restarts the relay when the
+# certificate changed (live sessions drop; the vehicle's dead-man trips).
+
+bootcmd:
+  # The relay runs as nobody and binds 443 in the host network namespace.
+  - sysctl -w net.ipv4.ip_unprivileged_port_start=443
+  # Larger UDP socket buffers for QUIC.
+  - sysctl -w net.core.rmem_max=7500000
+  - sysctl -w net.core.wmem_max=7500000
+
+write_files:
+  - path: /etc/tq/lib.sh
+    permissions: "0644"
+    content: |
+      md=http://metadata.google.internal/computeMetadata/v1
+      metadata() { curl -sf -H 'Metadata-Flavor: Google' "$md/$1"; }
+      # Latest version of a Secret Manager secret, using the VM's identity.
+      secret() {
+        local token project
+        token=$(metadata instance/service-accounts/default/token | sed -E 's/.*"access_token" *: *"([^"]+)".*/\1/')
+        project=$(metadata project/project-id)
+        curl -sf -H "Authorization: Bearer $token" \
+          "https://secretmanager.googleapis.com/v1/projects/$project/secrets/$1/versions/latest:access" \
+          | tr -d ' \n' | sed -E 's/.*"data":"([^"]+)".*/\1/' | base64 -d
+      }
+
+  - path: /etc/tq/secrets.sh
+    permissions: "0644"
+    content: |
+      set -euo pipefail
+      . /etc/tq/lib.sh
+      umask 077
+      mkdir -p /run/tq
+      shared=$(secret ${shared_secret_id})
+      cf=$(secret ${cloudflare_secret})
+      [ -n "$shared" ] && [ -n "$cf" ] || { echo "empty secret" >&2; exit 1; }
+      printf 'TQ_SHARED_SECRET=%s\n' "$shared" > /run/tq/relay.env
+      printf 'dns_cloudflare_api_token = %s\n' "$cf" > /run/tq/cloudflare.ini
+
+  - path: /etc/tq/cert.sh
+    permissions: "0644"
+    content: |
+      set -euo pipefail
+      domain=${hostname}
+      email="${acme_email}"
+      args=(certonly --non-interactive --agree-tos --keep-until-expiring
+            --dns-cloudflare --dns-cloudflare-credentials /cloudflare.ini
+            --dns-cloudflare-propagation-seconds 30 -d "$domain")
+      if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
+      if [ "${acme_staging}" = "true" ]; then args+=(--staging); fi
+      mkdir -p /var/lib/tq/letsencrypt /var/lib/tq/certs
+      docker run --rm \
+        -v /var/lib/tq/letsencrypt:/etc/letsencrypt \
+        -v /run/tq/cloudflare.ini:/cloudflare.ini:ro \
+        certbot/dns-cloudflare:latest "$${args[@]}"
+      # Copies readable by the relay (nobody); restart it only on a change.
+      live=/var/lib/tq/letsencrypt/live/$domain
+      out=/var/lib/tq/certs
+      if ! cmp -s "$live/fullchain.pem" "$out/fullchain.pem"; then
+        install -m 0644 -o 65534 -g 65534 "$live/fullchain.pem" "$out/fullchain.pem"
+        install -m 0600 -o 65534 -g 65534 "$live/privkey.pem" "$out/privkey.pem"
+        echo "certificate for $domain updated"
+        if systemctl is-active --quiet tq-relay; then systemctl restart tq-relay; fi
+      fi
+
+  - path: /etc/tq/relay.sh
+    permissions: "0644"
+    content: |
+      set -euo pipefail
+      . /etc/tq/lib.sh
+      image=$(metadata instance/attributes/tq-relay-image)
+      docker pull "$image" || docker image inspect "$image" >/dev/null
+      exec docker run --rm --name tq-relay --network host \
+        --env-file /run/tq/relay.env \
+        -e TQ_QUIC=0.0.0.0:443 \
+        -e TQ_HTTP=0.0.0.0:443 \
+        -e TQ_HTTP_TLS=true \
+        -e TQ_CORS_ORIGINS=${cors_origins} \
+        -v /var/lib/tq/certs:/certs:ro \
+        "$image" --cert /certs/fullchain.pem --key /certs/privkey.pem
+
+  - path: /etc/systemd/system/tq-secrets.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=tq: fetch secrets from Secret Manager
+      Wants=network-online.target
+      After=network-online.target
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/bash /etc/tq/secrets.sh
+      Restart=on-failure
+      RestartSec=10
+
+  - path: /etc/systemd/system/tq-cert.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=tq: obtain or renew the relay certificate
+      Requires=docker.service tq-secrets.service
+      After=docker.service tq-secrets.service
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash /etc/tq/cert.sh
+
+  - path: /etc/systemd/system/tq-cert-renew.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=tq: daily certificate renewal check
+      [Timer]
+      OnCalendar=*-*-* 04:17:00
+      RandomizedDelaySec=1h
+      Persistent=true
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/systemd/system/tq-cert-renew.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=tq: certificate renewal
+      Requires=tq-secrets.service
+      After=tq-secrets.service
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash /etc/tq/cert.sh
+
+  - path: /etc/systemd/system/tq-relay.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=tq relay
+      Requires=docker.service tq-secrets.service
+      After=docker.service tq-secrets.service tq-cert.service
+      ConditionPathExists=/var/lib/tq/certs/fullchain.pem
+      [Service]
+      ExecStartPre=-/usr/bin/docker rm -f tq-relay
+      ExecStart=/bin/bash /etc/tq/relay.sh
+      # SIGTERM; the relay closes its sessions and exits.
+      ExecStop=/usr/bin/docker stop -t 10 tq-relay
+      Restart=always
+      RestartSec=5
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl start tq-secrets.service
+  - systemctl start tq-cert.service
+  - systemctl start tq-relay.service
+  - systemctl start tq-cert-renew.timer

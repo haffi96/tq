@@ -4,3 +4,7 @@
 /dev/certs
 /config/*.local.json
 /dist
+/web/.wrangler
+/infra/gcp/.terraform
+/infra/gcp/*.tfstate*
+/infra/gcp/terraform.tfvars
