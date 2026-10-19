@@ -125,7 +125,8 @@ It reads the certificate hash and the QUIC port from `--relay-http`
 otherwise it signs one with `TQ_SHARED_SECRET` or asks a `--dev` relay.
 Started from Finder (the `.dmg` build) or a desktop launcher, it takes the
 same settings from `~/Library/Application Support/tq-app/config.json`
-(macOS) or `~/.config/tq-app/config.json` (Linux), and it updates itself
+(macOS) or `$XDG_CONFIG_HOME/tq-app/config.json` (default
+`~/.config/tq-app/config.json`) on Linux, and it updates itself
 from GitHub Releases ([docs/install.md](docs/install.md#native-app-tq-app)).
 The operator controls match the web page: Claim / Force claim / Release,
 hold `W`/`A`/`S`/`D`, and `Space` for e-stop.
