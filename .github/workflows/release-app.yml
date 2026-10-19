@@ -7,8 +7,9 @@ on:
   push:
     tags: ['app-v*']
 
+# Only the release job writes; the build jobs get a read-only token.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +20,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: dev/release.sh check app "${GITHUB_REF_NAME#app-v}"
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -39,6 +42,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: dev/release.sh check app "${GITHUB_REF_NAME#app-v}"
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
       - uses: dtolnay/rust-toolchain@master
@@ -54,10 +59,13 @@ jobs:
   release:
     needs: [macos, linux]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           path: dist
