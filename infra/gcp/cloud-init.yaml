@@ -59,7 +59,13 @@ write_files:
             --dns-cloudflare --dns-cloudflare-credentials /cloudflare.ini
             --dns-cloudflare-propagation-seconds 30 -d "$domain")
       if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
-      if [ "${acme_staging}" = "true" ]; then args+=(--staging); fi
+      if [ "${acme_staging}" = "true" ]; then
+        args+=(--staging)
+      elif grep -qs acme-staging "/var/lib/tq/letsencrypt/renewal/$domain.conf"; then
+        # Leaving staging: the staging certificate is not due for renewal,
+        # so certbot would keep it without --force-renewal.
+        args+=(--force-renewal)
+      fi
       mkdir -p /var/lib/tq/letsencrypt /var/lib/tq/certs
       docker run --rm \
         -v /var/lib/tq/letsencrypt:/etc/letsencrypt \
