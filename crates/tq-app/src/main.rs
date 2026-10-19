@@ -45,8 +45,9 @@ struct Args {
     /// on macOS, ~/.config/tq-app/config.json on Linux.
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Relay HTTP endpoint (certificate hash, QUIC port, dev tokens).
-    /// Default http://127.0.0.1:8080.
+    /// Relay HTTP endpoint (certificate hash, QUIC port, dev tokens):
+    /// https:// for a relay with a real certificate, http:// for a
+    /// self-signed or dev one. Default http://127.0.0.1:8080.
     #[arg(long)]
     relay_http: Option<url::Url>,
     /// Relay QUIC `host:port`; default: the HTTP host and the relay's QUIC port.

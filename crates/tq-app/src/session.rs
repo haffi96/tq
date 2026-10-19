@@ -79,7 +79,10 @@ pub enum Event {
 pub enum Command {
     Control(Control),
     /// One teleop command datagram.
-    Teleop { command: String, args: serde_json::Value },
+    Teleop {
+        command: String,
+        args: serde_json::Value,
+    },
 }
 
 /// Clock offsets, microseconds. Mine is this app minus the relay, the
@@ -299,7 +302,11 @@ async fn connect(shared: &Shared) -> anyhow::Result<(Session, Option<BuildInfo>)
         Some(r) => r.clone(),
         None => {
             let h = c.http.host_str().context("relay URL has no host")?;
-            let h = if h.contains(':') && !h.starts_with('[') { format!("[{h}]") } else { h.to_string() };
+            let h = if h.contains(':') && !h.starts_with('[') {
+                format!("[{h}]")
+            } else {
+                h.to_string()
+            };
             format!("{h}:{}", info.quic_port)
         }
     };
@@ -464,7 +471,10 @@ async fn read_datagrams(shared: Arc<Shared>, session: Session) -> anyhow::Result
         let mut t = shared.teleop.lock().unwrap();
         match Datagram::decode(d) {
             Ok(Datagram::Ack {
-                echo_us, status, detail, ..
+                echo_us,
+                status,
+                detail,
+                ..
             }) => {
                 t.ack_rtt.add(now.saturating_sub(echo_us) as f64 / 1000.0);
                 *t.acks.entry(format!("{status:?}").to_lowercase()).or_default() += 1;
@@ -493,7 +503,13 @@ async fn send_teleop(shared: Arc<Shared>, session: Session) -> anyhow::Result<()
         if last_hb.elapsed() >= HEARTBEAT {
             last_hb = Instant::now();
             hb = hb.wrapping_add(1);
-            let _ = session.send_datagram(Datagram::Heartbeat { seq: hb, sent_us: now_us() }.encode());
+            let _ = session.send_datagram(
+                Datagram::Heartbeat {
+                    seq: hb,
+                    sent_us: now_us(),
+                }
+                .encode(),
+            );
         }
         let drive = *shared.drive.lock().unwrap();
         if drive.active {
@@ -504,27 +520,64 @@ async fn send_teleop(shared: Arc<Shared>, session: Session) -> anyhow::Result<()
     }
 }
 
-/// Minimal HTTP/1.0 GET for the relay's JSON endpoints.
+/// Minimal HTTP/1.0 GET for the relay's JSON endpoints: plain for `http://`
+/// (dev, self-signed relays), TLS over the system roots for `https://`.
 async fn http_get_json<T: serde::de::DeserializeOwned>(url: &url::Url) -> anyhow::Result<T> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, request: &str) -> anyhow::Result<Vec<u8>> {
+        s.write_all(request.as_bytes()).await?;
+        let mut body = Vec::new();
+        match s.read_to_end(&mut body).await {
+            Ok(_) => {}
+            // Some servers close without a TLS close_notify; the HTTP/1.0
+            // body ends at the close either way.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !body.is_empty() => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(body)
+    }
+
     let host = url.host_str().context("no host")?;
     let port = url.port_or_known_default().unwrap_or(80);
-    let addr = format!("{}:{port}", if host.contains(':') { format!("[{host}]") } else { host.to_string() });
-    let mut s = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(&addr))
+    let addr = format!(
+        "{}:{port}",
+        if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        }
+    );
+    let tcp = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(&addr))
         .await
         .context("timeout")??;
     let path = match url.query() {
         Some(q) => format!("{}?{q}", url.path()),
         None => url.path().to_string(),
     };
-    s.write_all(format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").as_bytes()).await?;
-    let mut body = Vec::new();
-    s.read_to_end(&mut body).await?;
-    let text = String::from_utf8_lossy(&body);
+    let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n");
+    let response = tokio::time::timeout(Duration::from_secs(5), async {
+        match url.scheme() {
+            "https" => {
+                let tls = tokio_rustls::TlsConnector::from(Arc::new(tq_transport::quic::https_client_config()?));
+                let name = rustls_pki_name(host)?;
+                exchange(tls.connect(name, tcp).await?, &request).await
+            }
+            "http" => exchange(tcp, &request).await,
+            other => anyhow::bail!("unsupported scheme {other}://"),
+        }
+    })
+    .await
+    .context("timeout")??;
+    let text = String::from_utf8_lossy(&response);
     let (head, body) = text.split_once("\r\n\r\n").context("bad HTTP response")?;
     let status = head.split_whitespace().nth(1).unwrap_or("");
     if status != "200" {
         anyhow::bail!("HTTP {status}: {}", body.trim());
     }
     Ok(serde_json::from_str(body)?)
+}
+
+fn rustls_pki_name(host: &str) -> anyhow::Result<tokio_rustls::rustls::pki_types::ServerName<'static>> {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string()).context("invalid TLS server name")
 }

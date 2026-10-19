@@ -1,0 +1,39 @@
+{
+  "av_id": "robot-01",
+  "relay_url": "https://tq-relay-1.haffi.dev:443",
+  "relay_trust": {
+    "mode": "system_roots"
+  },
+  "shared_secret": "",
+  "max_lag_ms": 400,
+  "quic": {
+    "congestion": "bbr",
+    "send_window": 1048576
+  },
+  "teleop": {
+    "heartbeat_loss_ms": 500,
+    "command_stale_ms": 500
+  },
+  "cameras": [
+    {
+      "id": "front",
+      "label": "Front (H.264)",
+      "source": "127.0.0.1:5010",
+      "codec": "auto",
+      "framing": "auto",
+      "width": 1280,
+      "height": 720,
+      "fps": 30
+    },
+    {
+      "id": "rear",
+      "label": "Rear (H.265)",
+      "source": "127.0.0.1:5011",
+      "codec": "auto",
+      "framing": "auto",
+      "width": 1280,
+      "height": 720,
+      "fps": 30
+    }
+  ]
+}

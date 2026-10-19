@@ -157,6 +157,17 @@ pub fn client(trust: ServerTrust, opts: &QuicOptions) -> anyhow::Result<web_tran
     Ok(web_transport_quinn::Client::new(endpoint, config))
 }
 
+/// TLS client config over the system's CA roots, for HTTPS to the relay.
+pub fn https_client_config() -> anyhow::Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    let (added, _) = roots.add_parsable_certificates(rustls_native_certs());
+    anyhow::ensure!(added > 0, "no system CA certificates found");
+    Ok(rustls::ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth())
+}
+
 fn rustls_native_certs() -> Vec<CertificateDer<'static>> {
     // Avoid another dependency: read the system bundle when present.
     let candidates = [
