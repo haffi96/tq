@@ -17,7 +17,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::{ServeDir, ServeFile},
 };
-use tq_proto::{now_us, sign_token, Claims, Role};
+use tq_proto::{now_us, sign_token, verify_token, Claims, Role, RoomState, TokenError};
 use tq_transport::cert::Certificate;
 
 use crate::Relay;
@@ -97,9 +97,32 @@ async fn info(State(relay): State<Arc<Relay>>) -> impl IntoResponse {
     }))
 }
 
-async fn rooms(State(relay): State<Arc<Relay>>) -> impl IntoResponse {
-    let rooms: Vec<_> = relay.rooms.lock().unwrap().values().cloned().collect();
-    Json(rooms.iter().map(|r| r.state()).collect::<Vec<_>>())
+#[derive(Deserialize)]
+struct RoomsQuery {
+    #[serde(default)]
+    token: String,
+}
+
+/// The rooms a token is valid for (all of them for `*`), with their
+/// participants. Needs `?token=`, like the WebTransport sessions.
+async fn rooms(State(relay): State<Arc<Relay>>, Query(q): Query<RoomsQuery>) -> axum::response::Response {
+    match rooms_for(&relay, &q.token) {
+        Ok(rooms) => Json(rooms).into_response(),
+        Err(e) => (StatusCode::UNAUTHORIZED, format!("?token=: {e}")).into_response(),
+    }
+}
+
+pub(crate) fn rooms_for(relay: &Relay, token: &str) -> Result<Vec<RoomState>, TokenError> {
+    let claims = verify_token(relay.secret.as_bytes(), token, now_us() / 1_000_000)?;
+    let rooms: Vec<_> = relay
+        .rooms
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|r| claims.allows_room(&r.id))
+        .cloned()
+        .collect();
+    Ok(rooms.iter().map(|r| r.state()).collect())
 }
 
 #[derive(Deserialize)]

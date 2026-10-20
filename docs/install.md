@@ -59,7 +59,8 @@ pace.
   with uncommitted changes.
 - **Relay HTTP:**
   - `GET /api/info` returns `build`, the relay's own build.
-  - `GET /api/rooms` includes each publisher's `build`.
+  - `GET /api/rooms?token=…` lists the rooms the token is valid for, with
+    each publisher's `build` and each room's participants.
 - **Logs:** each binary logs its build at startup. The relay logs the build
   of every publisher and client that connects.
 
@@ -291,7 +292,7 @@ flags. It reads its settings from a file instead; flags still override it:
 | --- | --- |
 | `relay_http` | Relay HTTP base. Default `http://127.0.0.1:8080`. Use `https://` for a relay with a real certificate (checked against the system CA roots), and `http://` for a self-signed or dev relay. |
 | `relay` | QUIC `host:port`. Default: the HTTP host and the relay's QUIC port. |
-| `av`, `role` | Default `robot-01`, `viewer`. |
+| `room`, `role` | Default `robot-01`, `viewer`. |
 | `token` or `secret` | A session token, or the shared secret to sign one. Without either, the app asks a `--dev` relay for a token. |
 | `update.repo`, `update.prerelease` | Where updates come from (default `haffi96/tq`), and whether to offer pre-releases. |
 | `update.token` | Optional GitHub token (see [Tokens](#tokens)). |

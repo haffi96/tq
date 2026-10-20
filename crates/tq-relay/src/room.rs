@@ -114,9 +114,13 @@ impl Room {
         let seq = inner.seq;
         tracing::debug!(room = %self.id, seq, ?event, "event");
         let bytes = RoomMessage::Event(RoomEvent { seq, ts_us, event }).encode();
+        // Bump first: a session that subscribes after the send below must
+        // not get a cached snapshot from before this event (it would
+        // never see the event). Its snapshot waits for this lock instead,
+        // and so includes it.
+        self.bump();
         // No receivers is fine: nobody is watching.
         let _ = self.events.send(Sequenced { seq, bytes });
-        self.bump();
     }
 
     /// Events from now on. Subscribe before taking the [`Self::snapshot`]

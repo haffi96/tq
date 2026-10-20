@@ -349,3 +349,27 @@ async fn hello_is_required() {
         "welcomed without a hello: {r:?}"
     );
 }
+
+#[tokio::test]
+async fn rooms_api_needs_a_token_for_the_room() {
+    let h = Harness::start().await;
+    let (_v, _vctl, _id, _w) = h.participant(Role::Viewer, "watcher").await;
+    let token = |room: &str| {
+        sign_token(
+            SECRET.as_bytes(),
+            &Claims {
+                sub: "ops".into(),
+                role: Role::Viewer,
+                room: room.into(),
+                exp: now_us() / 1_000_000 + 60,
+            },
+        )
+    };
+    assert!(crate::web::rooms_for(&h.relay, "").is_err());
+    assert!(crate::web::rooms_for(&h.relay, "not.a.token").is_err());
+    assert!(crate::web::rooms_for(&h.relay, &token("other")).unwrap().is_empty());
+    let rooms = crate::web::rooms_for(&h.relay, &token("r1")).unwrap();
+    assert_eq!(rooms.len(), 1);
+    assert_eq!(rooms[0].participants[0].sub, "watcher");
+    assert_eq!(crate::web::rooms_for(&h.relay, &token("*")).unwrap().len(), 1);
+}

@@ -134,7 +134,19 @@ function renderVersions() {
 // --- room state ------------------------------------------------------------
 
 function renderState() {
-  if (!state) return;
+  if (!state) {
+    // Disconnected: nothing room-dependent is known until the next state.
+    $('claim-status').textContent = '–';
+    $('claim-status').className = 'pill';
+    document.body.classList.remove('driving');
+    $('publisher').textContent = 'publisher offline';
+    $('publisher').className = 'pill bad';
+    $('deadman').textContent = 'dead-man: –';
+    $('deadman').className = 'deadman';
+    $('viewers').textContent = '';
+    renderVersions();
+    return;
+  }
   const p = state.publisher;
   ensureTiles(state.tracks.map((t) => t.camera));
   const holder = state.operator;
@@ -335,6 +347,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       if (msg.state !== 'connected') {
         session = null;
         state = null;
+        renderState();
       }
       break;
     case 'control':

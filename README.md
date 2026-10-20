@@ -174,7 +174,7 @@ cargo build --release
 ./target/release/tq-probe --role operator --teleop-hz 20 --duration 20   # headless check
 ```
 
-Tokens: `tq-relay token --role operator --av robot-01` prints a token. Pass
+Tokens: `tq-relay token --role operator --room robot-01` prints a token. Pass
 it to the page as `?token=`. Without `--dev`, the relay does not mint tokens
 over HTTP.
 
