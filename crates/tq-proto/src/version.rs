@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The protocol this build speaks.
-pub const PROTOCOL: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
+pub const PROTOCOL: ProtocolVersion = ProtocolVersion { major: 2, minor: 0 };
 
 /// What a peer without build info speaks: everything before 1.1.
 pub const PROTOCOL_LEGACY: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };

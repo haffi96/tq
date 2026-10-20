@@ -7,17 +7,17 @@ use std::{
 
 use anyhow::Context;
 use tokio::task::JoinSet;
-use tq_proto::{clock_offset, now_us, Claims, Compat, Control, MediaFrame};
+use tq_proto::{clock_offset, now_us, Claims, Compat, Control, MediaFrame, RoomEvent, RoomMessage};
 use tq_transport::{
     control::{ControlRx, ControlTx},
-    group::GroupReader,
+    events::{EventsRx, Incoming},
     quic::quic_stats,
     track::{Push, Track},
     Session,
 };
 
 use crate::{
-    av::{Av, PublisherLink},
+    room::{PublisherLink, Room},
     Relay,
 };
 
@@ -26,7 +26,7 @@ use crate::{
 const PING_INTERVAL: Duration = Duration::from_millis(500);
 const CLOCK_WINDOW: usize = 20;
 
-pub async fn run(relay: Arc<Relay>, av: Arc<Av>, session: Session, claims: Claims) -> anyhow::Result<()> {
+pub async fn run(relay: Arc<Relay>, room: Arc<Room>, session: Session, claims: Claims) -> anyhow::Result<()> {
     let conn_id = relay.next_conn.fetch_add(1, Relaxed);
     let (send, recv) = tokio::time::timeout(Duration::from_secs(5), session.accept_bi())
         .await
@@ -34,7 +34,7 @@ pub async fn run(relay: Arc<Relay>, av: Arc<Av>, session: Session, claims: Claim
     let ctl = ControlTx::new(send);
     let mut rx = ControlRx::new(recv);
     let Some(Control::Announce {
-        av_id,
+        room_id,
         publisher_id,
         cameras,
         build,
@@ -48,7 +48,7 @@ pub async fn run(relay: Arc<Relay>, av: Arc<Av>, session: Session, claims: Claim
     match Compat::of_build(build.as_ref()) {
         Compat::Same => {}
         Compat::MinorDiffers => {
-            tracing::warn!(av = %av.id, %publisher_id, "{}", tq_proto::mismatch("publisher", build.as_ref(), "tq-relay"))
+            tracing::warn!(room = %room.id, %publisher_id, "{}", tq_proto::mismatch("publisher", build.as_ref(), "tq-relay"))
         }
         Compat::Incompatible => {
             let reason = tq_proto::mismatch("publisher", build.as_ref(), "tq-relay");
@@ -61,42 +61,30 @@ pub async fn run(relay: Arc<Relay>, av: Arc<Av>, session: Session, claims: Claim
             anyhow::bail!("refused publisher {publisher_id}: {reason}");
         }
     }
-    if av_id != av.id {
+    if room_id != room.id {
         ctl.send(&Control::Error {
-            message: format!("announce for {av_id} on /v1/publish/{}", av.id),
+            message: format!("announce for {room_id} on /v1/publish/{}", room.id),
         })
         .await?;
-        anyhow::bail!("av mismatch");
+        anyhow::bail!("room mismatch");
     }
-    tracing::info!(av = %av.id, %publisher_id, sub = %claims.sub, cameras = cameras.len(), %version, "publisher announced");
+    tracing::info!(room = %room.id, %publisher_id, sub = %claims.sub, cameras = cameras.len(), %version, "publisher announced");
 
-    let old = {
-        let mut inner = av.inner.lock().unwrap();
-        let cameras_changed = inner.cameras != cameras;
-        for c in &cameras {
-            inner.tracks.entry(c.id.clone()).or_insert_with(Track::new);
-        }
-        inner.cameras = cameras.clone();
-        let old = inner.publisher.replace(PublisherLink {
-            conn_id,
-            publisher_id: publisher_id.clone(),
-            build,
-            session: session.clone(),
-            ctl: ctl.clone(),
-            cameras: cameras.clone(),
-            camera_status: Vec::new(),
-            teleop: Default::default(),
-            rtt_ms: None,
-            clock: tq_proto::ClockFilter::new(CLOCK_WINDOW),
-            quic: None,
-        });
-        if cameras_changed {
-            av.cameras_version.send_modify(|v| *v += 1);
-        }
-        old
-    };
+    let old = room.publisher_connected(PublisherLink {
+        conn_id,
+        publisher_id: publisher_id.clone(),
+        build,
+        session: session.clone(),
+        ctl: ctl.clone(),
+        cameras: cameras.clone(),
+        camera_status: Vec::new(),
+        teleop: Default::default(),
+        rtt_ms: None,
+        clock: tq_proto::ClockFilter::new(CLOCK_WINDOW),
+        quic: None,
+    });
     if let Some(old) = old {
-        tracing::warn!(av = %av.id, "replacing previous publisher session");
+        tracing::warn!(room = %room.id, "replacing previous publisher session");
         old.session
             .close(tq_proto::code::REPLACED, b"replaced by a new publisher session");
     }
@@ -105,18 +93,18 @@ pub async fn run(relay: Arc<Relay>, av: Arc<Av>, session: Session, claims: Claim
         relay: Some(relay.build.clone()),
     })
     .await?;
-    av.notify_operator();
-    av.bump();
+    room.notify_operator();
 
     let mut tasks = JoinSet::new();
     tasks.spawn(ingest(
         session.clone(),
-        av.clone(),
+        room.clone(),
+        conn_id,
         cameras.iter().map(|c| c.id.clone()).collect(),
     ));
-    tasks.spawn(control_loop(rx, av.clone(), conn_id));
-    tasks.spawn(ping_loop(ctl.clone(), av.clone(), conn_id, session.clone()));
-    tasks.spawn(datagrams(session.clone(), av.clone()));
+    tasks.spawn(control_loop(rx, room.clone(), conn_id));
+    tasks.spawn(ping_loop(ctl.clone(), room.clone(), conn_id, session.clone()));
+    tasks.spawn(datagrams(session.clone(), room.clone()));
 
     let result = tokio::select! {
         e = session.closed() => Err(anyhow::Error::from(e)),
@@ -124,25 +112,16 @@ pub async fn run(relay: Arc<Relay>, av: Arc<Av>, session: Session, claims: Claim
     };
     tasks.abort_all();
 
-    {
-        let mut inner = av.inner.lock().unwrap();
-        if inner.publisher.as_ref().is_some_and(|p| p.conn_id == conn_id) {
-            inner.publisher = None;
-            for t in inner.tracks.values() {
-                t.reset();
-            }
-        }
-    }
-    av.bump();
-    tracing::info!(av = %av.id, %publisher_id, "publisher gone");
+    room.publisher_disconnected(conn_id);
+    tracing::info!(room = %room.id, %publisher_id, "publisher gone");
     result
 }
 
-/// Accepts one unidirectional stream per GOP and pushes its frames into the
-/// camera's track.
-async fn ingest(session: Session, av: Arc<Av>, camera_ids: Vec<String>) -> anyhow::Result<()> {
+/// Accepts the publisher's unidirectional streams: one per GOP, pushed
+/// into the camera's track, and its events stream.
+async fn ingest(session: Session, room: Arc<Room>, conn_id: u64, camera_ids: Vec<String>) -> anyhow::Result<()> {
     let tracks: Vec<Arc<Track>> = {
-        let inner = av.inner.lock().unwrap();
+        let inner = room.inner.lock().unwrap();
         camera_ids.iter().map(|id| inner.tracks[id].clone()).collect()
     };
     // Newest group started per camera on this connection. A group stream
@@ -154,11 +133,18 @@ async fn ingest(session: Session, av: Arc<Av>, camera_ids: Vec<String>) -> anyho
         let stream = session.accept_uni().await?;
         let tracks = tracks.clone();
         let newest = newest.clone();
+        let room = room.clone();
         tokio::spawn(async move {
-            let mut reader = match GroupReader::open(stream).await {
-                Ok(r) => r,
+            let mut reader = match Incoming::open(stream).await {
+                Ok(Incoming::Group(r)) => r,
+                Ok(Incoming::Events(rx)) => {
+                    if let Err(e) = robot_events(rx, &room, conn_id).await {
+                        tracing::debug!(room = %room.id, error = format!("{e:#}"), "publisher events stream ended");
+                    }
+                    return;
+                }
                 Err(e) => {
-                    tracing::debug!(error = %e, "bad group stream");
+                    tracing::debug!(error = %e, "bad stream");
                     return;
                 }
             };
@@ -199,28 +185,50 @@ async fn ingest(session: Session, av: Arc<Av>, camera_ids: Vec<String>) -> anyho
     }
 }
 
-async fn control_loop(mut rx: ControlRx, av: Arc<Av>, conn_id: u64) -> anyhow::Result<()> {
+/// The publisher's events: track online/offline and the dead-man.
+async fn robot_events(mut rx: EventsRx, room: &Room, conn_id: u64) -> anyhow::Result<()> {
+    let mut last = 0u64;
+    while let Some(msg) = rx.recv().await? {
+        let RoomMessage::Event(RoomEvent { seq, ts_us, event }) = msg else {
+            continue;
+        };
+        if seq != last + 1 {
+            // Harmless: the publisher restates everything after a gap of
+            // its own, and unchanged values are dropped.
+            tracing::debug!(room = %room.id, expected = last + 1, seq, "gap in publisher events");
+        }
+        last = seq;
+        if !event.from_robot() {
+            tracing::warn!(room = %room.id, ?event, "publisher sent an event it does not own");
+            continue;
+        }
+        room.robot_event(conn_id, event, ts_us);
+    }
+    Ok(())
+}
+
+async fn control_loop(mut rx: ControlRx, room: Arc<Room>, conn_id: u64) -> anyhow::Result<()> {
     while let Some(msg) = rx.recv().await? {
         match msg {
             Control::PublisherStatus { cameras, teleop } => {
-                let mut inner = av.inner.lock().unwrap();
+                let mut inner = room.inner.lock().unwrap();
                 if let Some(p) = inner.publisher.as_mut().filter(|p| p.conn_id == conn_id) {
                     p.camera_status = cameras;
                     p.teleop = teleop;
                 }
                 drop(inner);
-                av.bump();
+                room.bump();
             }
             Control::Pong { t0_us, t1_us, .. } => {
                 let (offset, rtt) = clock_offset(t0_us, t1_us, now_us());
-                let mut inner = av.inner.lock().unwrap();
+                let mut inner = room.inner.lock().unwrap();
                 if let Some(p) = inner.publisher.as_mut().filter(|p| p.conn_id == conn_id) {
                     p.rtt_ms = Some(rtt as f64 / 1000.0);
                     p.clock.add(offset, rtt);
                 }
             }
             Control::Ping { id, t0_us } => {
-                let ctl = av.inner.lock().unwrap().publisher.as_ref().map(|p| p.ctl.clone());
+                let ctl = room.inner.lock().unwrap().publisher.as_ref().map(|p| p.ctl.clone());
                 if let Some(ctl) = ctl {
                     ctl.send(&Control::Pong {
                         id,
@@ -236,14 +244,14 @@ async fn control_loop(mut rx: ControlRx, av: Arc<Av>, conn_id: u64) -> anyhow::R
     anyhow::bail!("publisher closed the control stream")
 }
 
-async fn ping_loop(ctl: ControlTx, av: Arc<Av>, conn_id: u64, session: Session) -> anyhow::Result<()> {
+async fn ping_loop(ctl: ControlTx, room: Arc<Room>, conn_id: u64, session: Session) -> anyhow::Result<()> {
     let mut id = 0;
     let mut t = tokio::time::interval(PING_INTERVAL);
     loop {
         t.tick().await;
         id += 1;
         ctl.send(&Control::Ping { id, t0_us: now_us() }).await?;
-        let mut inner = av.inner.lock().unwrap();
+        let mut inner = room.inner.lock().unwrap();
         if let Some(p) = inner.publisher.as_mut().filter(|p| p.conn_id == conn_id) {
             p.quic = Some(quic_stats(&session));
         }
@@ -252,11 +260,11 @@ async fn ping_loop(ctl: ControlTx, av: Arc<Av>, conn_id: u64, session: Session) 
 
 /// Publisher -> operator datagrams (acks, heartbeat echoes) go to the
 /// current claim holder only.
-async fn datagrams(session: Session, av: Arc<Av>) -> anyhow::Result<()> {
+async fn datagrams(session: Session, room: Arc<Room>) -> anyhow::Result<()> {
     loop {
         let data = session.read_datagram().await?;
         let target = {
-            let inner = av.inner.lock().unwrap();
+            let inner = room.inner.lock().unwrap();
             inner
                 .operator
                 .as_ref()

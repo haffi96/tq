@@ -5,7 +5,7 @@
 //! drawn as images.
 //!
 //! ```text
-//! tq-app --role operator --av robot-01      # relay on http://127.0.0.1:8080
+//! tq-app --role operator --room robot-01      # relay on http://127.0.0.1:8080
 //! ```
 //!
 //! Started without flags (from Finder, or a desktop launcher) it reads its
@@ -53,9 +53,9 @@ struct Args {
     /// Relay QUIC `host:port`; default: the HTTP host and the relay's QUIC port.
     #[arg(long)]
     relay: Option<String>,
-    /// Default robot-01.
+    /// The room (robot) to join. Default robot-01.
     #[arg(long)]
-    av: Option<String>,
+    room: Option<String>,
     /// operator or viewer (default).
     #[arg(long)]
     role: Option<Role>,
@@ -112,14 +112,14 @@ fn main() -> anyhow::Result<()> {
     let config = session::Config {
         http,
         relay: args.relay.or(file.relay),
-        av: args.av.or(file.av).unwrap_or_else(|| "robot-01".into()),
+        room: args.room.or(file.room).unwrap_or_else(|| "robot-01".into()),
         role,
         token: args.token.or(file.token),
         secret: args.secret.or(file.secret),
         log_stats: args.log_stats,
         build,
     };
-    let title = format!("tq · {} · {}", config.av, config.role);
+    let title = format!("tq · {} · {}", config.room, config.role);
     let shared = session::start(&rt, config, events_tx);
 
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {

@@ -13,7 +13,7 @@ use tq_media::{AuAssembler, NalFramer, Packager};
 use tq_proto::{now_us, FrameHeader, MediaFrame, FLAG_CAPTURE_FROM_SEI, FLAG_KEY};
 use tq_transport::track::Track;
 
-use crate::config::CameraConfig;
+use crate::{config::CameraConfig, edges::Edges};
 
 /// Counters shared with the status reporter.
 #[derive(Default)]
@@ -35,6 +35,7 @@ pub struct Camera {
     pub config: CameraConfig,
     pub track: Arc<Track>,
     pub stats: Arc<CameraStats>,
+    pub edges: Arc<Edges>,
 }
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -52,12 +53,19 @@ pub async fn run(camera: Arc<Camera>) {
                 logged_down = false;
                 let _ = stream.set_nodelay(true);
                 tracing::info!(camera = %cfg.id, source = %cfg.source, "source connected");
-                if let Err(e) = read_stream(&camera, stream, &mut group).await {
+                let reason = if let Err(e) = read_stream(&camera, stream, &mut group).await {
                     tracing::warn!(camera = %cfg.id, error = %e, "source error");
+                    format!("source error: {e}")
                 } else {
                     tracing::warn!(camera = %cfg.id, "source closed");
+                    "source closed".to_string()
+                };
+                if camera.stats.online.swap(false, Relaxed) {
+                    camera.edges.emit(tq_proto::Event::TrackOffline {
+                        camera: cfg.id.clone(),
+                        reason,
+                    });
                 }
-                camera.stats.online.store(false, Relaxed);
                 camera.track.reset();
             }
             Err(e) => {
@@ -119,7 +127,11 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
             }
             if !started {
                 started = true;
-                camera.stats.online.store(true, Relaxed);
+                if !camera.stats.online.swap(true, Relaxed) {
+                    camera
+                        .edges
+                        .emit(tq_proto::Event::TrackOnline { camera: cfg.id.clone() });
+                }
             }
             let mut flags = if frame.key { FLAG_KEY } else { 0 };
             let capture_us = match frame.capture_us {

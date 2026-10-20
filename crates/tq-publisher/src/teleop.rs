@@ -20,7 +20,7 @@ use std::{
 use serde::Deserialize;
 use tq_proto::{AckStatus, Datagram, TeleopStatus};
 
-use crate::config::TeleopConfig;
+use crate::{config::TeleopConfig, edges::Edges};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeleopCommand {
@@ -63,14 +63,16 @@ struct State {
 pub struct Teleop {
     cfg: TeleopConfig,
     sink: Arc<dyn TeleopSink>,
+    edges: Arc<Edges>,
     state: Mutex<State>,
 }
 
 impl Teleop {
-    pub fn new(cfg: TeleopConfig, sink: Arc<dyn TeleopSink>) -> Arc<Self> {
+    pub fn new(cfg: TeleopConfig, sink: Arc<dyn TeleopSink>, edges: Arc<Edges>) -> Arc<Self> {
         Arc::new(Self {
             cfg,
             sink,
+            edges,
             state: Mutex::new(State {
                 operator: None,
                 last_seq: None,
@@ -91,6 +93,9 @@ impl Teleop {
         if !s.tripped {
             s.tripped = true;
             self.sink.safe_stop(reason);
+            self.edges.emit(tq_proto::Event::DeadmanTripped {
+                reason: reason.to_string(),
+            });
         }
     }
 
@@ -161,6 +166,7 @@ impl Teleop {
                             tracing::info!(seq, "teleop re-armed by command");
                             s.tripped = false;
                             s.reason.clear();
+                            self.edges.emit(tq_proto::Event::DeadmanCleared);
                         }
                         Some(ack(seq, sent_us, AckStatus::Ok, ""))
                     }
@@ -248,6 +254,7 @@ mod tests {
                 command_stale_ms: 50,
             },
             sink.clone(),
+            Edges::new(),
         );
         assert!(matches!(
             t.handle(cmd(1)),
@@ -304,6 +311,7 @@ mod tests {
                 command_stale_ms: 30,
             },
             sink.clone(),
+            Edges::new(),
         );
         t.set_operator(Some("op".into()));
         t.handle(cmd(1));
@@ -329,6 +337,7 @@ mod tests {
                 command_stale_ms: 1000,
             },
             Arc::new(LoggingSink),
+            Edges::new(),
         );
         t.set_operator(Some("op".into()));
         t.handle(cmd(1));
@@ -344,5 +353,37 @@ mod tests {
         t.tick();
         // Commands are older than 30 ms too, but heartbeat loss is checked first.
         assert_eq!(t.status().reason, "operator heartbeat lost");
+    }
+
+    #[test]
+    fn edges_on_transitions_only() {
+        let edges = Edges::new();
+        let mut rx = edges.subscribe();
+        let t = Teleop::new(
+            TeleopConfig {
+                heartbeat_loss_ms: 1000,
+                command_stale_ms: 30,
+            },
+            Arc::new(LoggingSink),
+            edges,
+        );
+        // Starts tripped: no edge until it re-arms.
+        t.set_operator(Some("op".into()));
+        t.handle(cmd(1));
+        t.handle(cmd(2));
+        assert_eq!(rx.try_recv().unwrap().0, tq_proto::Event::DeadmanCleared);
+        assert!(rx.try_recv().is_err());
+        std::thread::sleep(Duration::from_millis(50));
+        t.tick();
+        t.tick();
+        assert_eq!(
+            rx.try_recv().unwrap().0,
+            tq_proto::Event::DeadmanTripped {
+                reason: "teleop commands stale".into()
+            }
+        );
+        // Already tripped: a new cause changes the reason, not the state.
+        t.connection_lost();
+        assert!(rx.try_recv().is_err());
     }
 }

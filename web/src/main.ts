@@ -2,7 +2,18 @@
 // decoding and drawing; this thread only builds the UI, forwards operator
 // input and shows the numbers.
 
-import { type BuildInfo, type CameraInfo, type Control, type RelayState, type Role, compat, mismatch, shortBuild } from './protocol';
+import {
+  type BuildInfo,
+  type CameraInfo,
+  type Control,
+  type Role,
+  type RoomEventBody,
+  type RoomMessage,
+  type RoomState,
+  compat,
+  mismatch,
+  shortBuild,
+} from './protocol';
 import { WEB_BUILD } from './version';
 import type { CameraStats, FromWorker, ToWorker, Window } from './worker';
 
@@ -10,7 +21,7 @@ import type { CameraStats, FromWorker, ToWorker, Window } from './worker';
 declare const TQ_RELAY_HTTP: string;
 
 const params = new URLSearchParams(location.search);
-const av = params.get('av') ?? 'robot-01';
+const room = params.get('room') ?? 'robot-01';
 const role: Role = params.get('role') === 'operator' ? 'operator' : 'viewer';
 // Photons -> capture timestamp (exposure, readout, ISP/USB) that the
 // camera's timestamp does not cover; calibrate with an optical measurement.
@@ -28,7 +39,7 @@ const worker = new Worker('/worker.js', { type: 'module' });
 const send = (msg: ToWorker, transfer: Transferable[] = []) => worker.postMessage(msg, transfer);
 
 let session: string | null = null;
-let state: RelayState | null = null;
+let state: RoomState | null = null;
 let relayBuild: BuildInfo | null = null;
 let publisherSeen: string | null = null;
 const tiles = new Map<string, { root: HTMLElement; overlay: HTMLElement; label: HTMLElement }>();
@@ -120,12 +131,12 @@ function renderVersions() {
   }
 }
 
-// --- relay / publisher state ----------------------------------------------
+// --- room state ------------------------------------------------------------
 
 function renderState() {
   if (!state) return;
   const p = state.publisher;
-  if (p) ensureTiles(p.cameras);
+  ensureTiles(state.tracks.map((t) => t.camera));
   const holder = state.operator;
   const mine = holder !== null && holder === session;
   $('claim-status').textContent = holder === null ? 'free' : mine ? 'you are driving' : `held by ${holder.slice(0, 8)}`;
@@ -152,7 +163,8 @@ function renderState() {
     dm.textContent = t.deadman_tripped ? `SAFE-STOPPED: ${t.reason}` : 'ARMED';
     dm.className = `deadman ${t.deadman_tripped ? 'tripped' : 'armed'}`;
   }
-  $('viewers').textContent = `${state.operators} operator(s), ${state.viewers} viewer(s)`;
+  const count = (r: Role) => state!.participants.filter((x) => x.role === r).length;
+  $('viewers').textContent = `${count('operator')} operator(s), ${count('viewer')} viewer(s)`;
   renderVersions();
 
   const rows: string[] = [];
@@ -173,15 +185,10 @@ function onControl(msg: Control) {
   switch (msg.type) {
     case 'welcome':
       session = msg.session;
-      state = msg.state;
       relayBuild = msg.relay ?? null;
       log(`relay runs ${describe(relayBuild)}`);
       if (compat(relayBuild) !== 'same') log(`warning: ${mismatch('relay', relayBuild)}`);
       $('session').textContent = `${msg.role} ${msg.session.slice(0, 8)}`;
-      renderState();
-      break;
-    case 'state':
-      state = msg.state;
       renderState();
       break;
     case 'claim_result':
@@ -195,6 +202,66 @@ function onControl(msg: Control) {
       break;
     default:
       break;
+  }
+}
+
+// A session as the log shows it: "you", or who and which session.
+function who(id: string | null): string {
+  if (id === null) return '–';
+  if (id === session) return 'you';
+  const p = state?.participants.find((x) => x.session === id);
+  return p ? `${p.sub} (${id.slice(0, 8)})` : id.slice(0, 8);
+}
+
+function describeEvent(e: RoomEventBody): string | null {
+  switch (e.type) {
+    case 'participant_joined':
+      if (e.participant.session === session) return null;
+      return `${e.participant.sub} (${e.participant.session.slice(0, 8)}) joined as ${e.participant.role}`;
+    case 'participant_left':
+      return `${e.participant.sub} (${e.participant.session.slice(0, 8)}) left`;
+    case 'publisher_connected':
+      return `publisher ${e.publisher_id} connected`;
+    case 'publisher_disconnected':
+      return `publisher ${e.publisher_id} ${e.reason === 'replaced' ? 'replaced by a new session' : 'disconnected'}`;
+    case 'track_published':
+      return `camera ${e.track.camera.id} published`;
+    case 'track_updated':
+      return `camera ${e.track.camera.id} changed: ${e.track.camera.codec} ${e.track.camera.width}x${e.track.camera.height}`;
+    case 'track_unpublished':
+      return `camera ${e.camera} unpublished: ${e.reason}`;
+    case 'track_online':
+      return `camera ${e.camera} online`;
+    case 'track_offline':
+      return `camera ${e.camera} offline: ${e.reason}`;
+    case 'operator_changed':
+      switch (e.reason) {
+        case 'claimed':
+          return `${who(e.to)} took the claim`;
+        case 'forced':
+          return `${who(e.to)} took the claim from ${who(e.from)}`;
+        case 'released':
+          return `${who(e.from)} released the claim`;
+        case 'left':
+          return `claim freed: ${who(e.from)} left`;
+      }
+      return null;
+    case 'deadman_tripped':
+      return `robot safe-stopped: ${e.reason}`;
+    case 'deadman_cleared':
+      return 'robot armed';
+    default:
+      return null;
+  }
+}
+
+function onRoom(msg: RoomMessage) {
+  if (msg.type === 'state') {
+    state = msg.state;
+    renderState();
+  } else if (msg.type === 'event') {
+    const line = describeEvent(msg.event);
+    if (line) log(line);
   }
 }
 
@@ -265,10 +332,16 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
     case 'status':
       $('conn').textContent = msg.state + (msg.detail ? `: ${msg.detail}` : '');
       $('conn').className = `pill ${msg.state === 'connected' ? 'ok' : msg.state === 'closed' ? 'bad' : 'warn'}`;
-      if (msg.state !== 'connected') session = null;
+      if (msg.state !== 'connected') {
+        session = null;
+        state = null;
+      }
       break;
     case 'control':
       onControl(msg.msg);
+      break;
+    case 'room':
+      onRoom(msg.msg);
       break;
     case 'stats': {
       for (const [id, s] of Object.entries(msg.cameras)) renderCameraStats(id, s);
@@ -292,7 +365,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
 // --- start -----------------------------------------------------------------
 
 async function start() {
-  $('title').textContent = `${av}`;
+  $('title').textContent = room;
   $('role').textContent = role;
   if (role === 'operator') setupOperator();
   renderVersions();
@@ -308,16 +381,16 @@ async function start() {
   if (compat(info.build) === 'incompatible') throw new Error(`incompatible relay: ${mismatch('relay', info.build)}`);
   let token = params.get('token');
   if (!token) {
-    const r = await fetch(new URL(`/api/dev/token?role=${role}&av=${encodeURIComponent(av)}`, relayHttp));
+    const r = await fetch(new URL(`/api/dev/token?role=${role}&room=${encodeURIComponent(room)}`, relayHttp));
     if (!r.ok) throw new Error(`no ?token= and the relay does not mint dev tokens (${r.status})`);
     token = ((await r.json()) as { token: string }).token;
   }
   // URL.hostname keeps the brackets around an IPv6 address.
   const host = params.get('relay') ?? `${relayHttp.hostname}:${info.quic_port}`;
-  const url = `https://${host}/v1/session/${encodeURIComponent(av)}?token=${encodeURIComponent(token)}`;
+  const url = `https://${host}/v1/session/${encodeURIComponent(room)}?token=${encodeURIComponent(token)}`;
   if (!('WebTransport' in window)) throw new Error('this browser has no WebTransport');
   if (!('VideoDecoder' in window)) throw new Error('this browser has no WebCodecs VideoDecoder');
-  send({ type: 'connect', url, certHash: info.self_signed ? info.sha256 : null, role, sensorMs, hello: !!info.build });
+  send({ type: 'connect', url, certHash: info.self_signed ? info.sha256 : null, role, sensorMs });
 }
 
 start().catch((e) => {

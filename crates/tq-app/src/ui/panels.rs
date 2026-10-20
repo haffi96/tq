@@ -16,7 +16,7 @@ use gpui_kit::{
     prelude::*,
     px, AnyElement, App, Context, Entity, SharedString, Window,
 };
-use tq_proto::{BuildInfo, Compat, Control};
+use tq_proto::{BuildInfo, Compat, Control, Role};
 
 use super::{
     model::{Model, UpdateState},
@@ -126,7 +126,7 @@ impl Render for Header {
                                 .gap_1p5()
                                 .items_center()
                                 .child(Icon::new(gpui_kit::assets::IconName::CarFront).small())
-                                .child(div().font_semibold().child(c.av.clone())),
+                                .child(div().font_semibold().child(c.room.clone())),
                         )
                         .child(
                             if m.operator() {
@@ -657,7 +657,11 @@ impl Render for Status {
         }
         right = right.child(versions);
         if let Some(s) = &m.state {
-            right = right.child(format!("{} operator · {} viewer", s.operators, s.viewers));
+            right = right.child(format!(
+                "{} operator · {} viewer",
+                s.count(Role::Operator),
+                s.count(Role::Viewer)
+            ));
         }
         right = right.child(format!("UI frame {} ms", fmt(m.frame_cost.avg, 2)));
         h_flex()

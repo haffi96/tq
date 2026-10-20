@@ -1,7 +1,7 @@
-//! What the panels show: connection and relay state, the stats windows,
+//! What the panels show: connection and room state, the stats windows,
 //! the operator's keys and the event log. An entity of its own so the
-//! panels re-render when it changes (control messages, key presses and the
-//! stats tick), never for a video frame.
+//! panels re-render when it changes (control messages, room events, key
+//! presses and the stats tick), never for a video frame.
 
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
@@ -9,7 +9,9 @@ use std::{
 };
 
 use gpui_kit::Context;
-use tq_proto::{BuildInfo, Compat, Control, RelayState, Role};
+use tq_proto::{
+    BuildInfo, Compat, Control, Event as RoomEvent, OperatorChange, PublisherGone, Role, RoomMessage, RoomState,
+};
 
 use crate::{
     feed::Stats,
@@ -26,7 +28,7 @@ pub struct Model {
     pub shared: Arc<Shared>,
     pub conn: (ConnState, Option<String>),
     pub session: Option<String>,
-    pub state: Option<RelayState>,
+    pub state: Option<RoomState>,
     pub link: Option<String>,
     pub stats: Vec<(String, Stats)>,
     /// Teleop ack and heartbeat round trips over the last stats interval.
@@ -236,7 +238,9 @@ impl Model {
             Event::Frame => return,
             Event::Status(state, detail) => {
                 if state != ConnState::Connected {
+                    // The next session's events stream starts with a state.
                     self.session = None;
+                    self.state = None;
                 }
                 if let (ConnState::Closed, Some(d)) = (state, &detail) {
                     self.push_log(format!("Disconnected: {d}"));
@@ -246,12 +250,19 @@ impl Model {
                 }
                 self.conn = (state, detail);
             }
+            Event::Room(RoomMessage::State { state, .. }) => {
+                self.state = Some(state);
+                self.note_publisher();
+            }
+            Event::Room(RoomMessage::Event(e)) => {
+                if let Some(line) = self.describe(&e.event) {
+                    self.push_log(line);
+                }
+            }
+            Event::Room(RoomMessage::Unknown) => {}
             Event::Control(msg) => match msg {
-                Control::Welcome {
-                    session, state, relay, ..
-                } => {
+                Control::Welcome { session, relay, .. } => {
                     self.session = Some(session);
-                    self.state = Some(state);
                     self.push_log(match &relay {
                         Some(b) => format!("Relay runs {}", b.long()),
                         None => "Relay runs an unknown version (protocol 1.0)".into(),
@@ -263,11 +274,6 @@ impl Model {
                         ));
                     }
                     self.relay_build = relay;
-                    self.note_publisher();
-                }
-                Control::State { state } => {
-                    self.state = Some(state);
-                    self.note_publisher();
                 }
                 Control::ClaimResult { ok: false, reason, .. } => {
                     self.push_log(format!("Claim refused: {}", reason.unwrap_or_default()))
@@ -290,6 +296,65 @@ impl Model {
             },
         }
         cx.notify();
+    }
+
+    /// A session, as the log shows it: who and which session, or "you".
+    fn who(&self, session: &str) -> String {
+        if self.session.as_deref() == Some(session) {
+            return "you".into();
+        }
+        let short = &session[..session.len().min(8)];
+        let sub = self
+            .state
+            .as_ref()
+            .and_then(|s| s.participants.iter().find(|p| p.session == session))
+            .map(|p| p.sub.clone());
+        match sub {
+            Some(sub) => format!("{sub} ({short})"),
+            None => short.to_string(),
+        }
+    }
+
+    /// A room event as a log line; `None` for those not worth one.
+    fn describe(&self, event: &RoomEvent) -> Option<String> {
+        Some(match event {
+            RoomEvent::ParticipantJoined { participant: p } if self.session.as_ref() != Some(&p.session) => {
+                format!("{} joined as {}", self.who_info(&p.sub, &p.session), p.role)
+            }
+            RoomEvent::ParticipantJoined { .. } => return None,
+            RoomEvent::ParticipantLeft { participant: p } => {
+                format!("{} ({}) left", self.who_info(&p.sub, &p.session), p.role)
+            }
+            RoomEvent::PublisherConnected { publisher_id, .. } => format!("Publisher {publisher_id} connected"),
+            RoomEvent::PublisherDisconnected { publisher_id, reason } => match reason {
+                PublisherGone::Disconnected => format!("Publisher {publisher_id} disconnected"),
+                PublisherGone::Replaced => format!("Publisher {publisher_id} replaced by a new session"),
+            },
+            RoomEvent::TrackPublished { track } => format!("Camera {} published", track.camera.id),
+            RoomEvent::TrackUpdated { track } => format!(
+                "Camera {} changed: {} {}x{}",
+                track.camera.id, track.camera.codec, track.camera.width, track.camera.height
+            ),
+            RoomEvent::TrackUnpublished { camera, reason } => format!("Camera {camera} unpublished: {reason}"),
+            RoomEvent::TrackOnline { camera } => format!("Camera {camera} online"),
+            RoomEvent::TrackOffline { camera, reason } => format!("Camera {camera} offline: {reason}"),
+            RoomEvent::OperatorChanged { from, to, reason } => match (reason, from, to) {
+                (OperatorChange::Claimed, _, Some(to)) => format!("{} took the claim", self.who(to)),
+                (OperatorChange::Forced, Some(from), Some(to)) => {
+                    format!("{} took the claim from {}", self.who(to), self.who(from))
+                }
+                (OperatorChange::Released, Some(from), _) => format!("{} released the claim", self.who(from)),
+                (OperatorChange::Left, Some(from), _) => format!("Claim freed: {} left", self.who(from)),
+                _ => "Operator changed".into(),
+            },
+            RoomEvent::DeadmanTripped { reason } => format!("Robot safe-stopped: {reason}"),
+            RoomEvent::DeadmanCleared => "Robot armed".into(),
+            RoomEvent::Unknown => return None,
+        })
+    }
+
+    fn who_info(&self, sub: &str, session: &str) -> String {
+        format!("{sub} ({})", &session[..session.len().min(8)])
     }
 
     fn push_log(&mut self, line: String) {

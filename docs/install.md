@@ -32,8 +32,12 @@ Every session starts with each side's build: version, commit and protocol.
 - The relay sends its build in `welcome` and `announce_ok`, and serves it at
   `/api/info`.
 
-Peers from before protocol 1.1 send no build. They count as protocol 1.0,
-which still works but shows a warning.
+Peers from before protocol 1.1 send no build. They count as protocol 1.0.
+
+Protocol 2.0 introduced rooms and the events stream (and renamed `av` to
+`room` in URLs, tokens and the publisher's `room_id`), so 1.x peers and
+2.0 peers refuse each other: upgrade the relay, publishers and apps
+together.
 
 **Rollout order:** relay first, then publishers and apps. The relay accepts
 any minor of its own major, so publishers and apps can follow at their own
@@ -50,12 +54,12 @@ pace.
 - **Web page:** the `versions` pill in the header. Hover over it to see the
   commits.
 - **CLIs:** `tq-relay --version`, `tq-publisher --version` and
-  `tq-app --version` print `0.1.0 (a1b2c3d4e5) protocol 1.1`.
+  `tq-app --version` print `0.1.0 (a1b2c3d4e5) protocol 2.0`.
   A `-dirty` suffix on the commit means the binary was built from a tree
   with uncommitted changes.
 - **Relay HTTP:**
   - `GET /api/info` returns `build`, the relay's own build.
-  - `GET /api/avs` includes each publisher's `build`.
+  - `GET /api/rooms` includes each publisher's `build`.
 - **Logs:** each binary logs its build at startup. The relay logs the build
   of every publisher and client that connects.
 
@@ -160,7 +164,7 @@ installed, unless you pass `--force`.
 ### Configure and run
 
 1. Edit `/etc/tq/publisher.json`. See `config/publisher.example.json` and
-   `config/publisher.prodlike.json`: set `av_id`, `relay_url`,
+   `config/publisher.prodlike.json`: set `room_id`, `relay_url`,
    `relay_trust` and the cameras.
 2. Put the token secret in `/etc/tq/publisher.env`:
    ```sh
@@ -277,7 +281,7 @@ flags. It reads its settings from a file instead; flags still override it:
 ```json
 {
   "relay_http": "https://tq-relay-1.haffi.dev",
-  "av": "robot-01",
+  "room": "robot-01",
   "role": "operator",
   "secret": "…"
 }

@@ -20,8 +20,8 @@ What Terraform creates:
 - the `tq-relay-1.haffi.dev` A record in Cloudflare, not proxied: Cloudflare's proxy cannot carry QUIC
 
 The relay serves both protocols on port 443: QUIC over UDP and HTTPS over TCP.
-It also serves its bundled web app, so `https://tq-relay-1.haffi.dev/?av=…`
-works as well as `https://tq.haffi.dev/?av=…`.
+It also serves its bundled web app, so `https://tq-relay-1.haffi.dev/?room=…`
+works as well as `https://tq.haffi.dev/?room=…`.
 
 ## Prerequisites
 
@@ -86,10 +86,10 @@ same secret:
 
 ```sh
 export TQ_SHARED_SECRET=$(terraform output -raw shared_secret)
-cargo run -p tq-relay -- token --role operator --av robot-01 --ttl-hours 12
+cargo run -p tq-relay -- token --role operator --room robot-01 --ttl-hours 12
 ```
 
-Then open `https://tq.haffi.dev/?av=robot-01&role=operator&token=…`.
+Then open `https://tq.haffi.dev/?room=robot-01&role=operator&token=…`.
 
 Publisher config:
 
@@ -108,7 +108,7 @@ tq-app (0.3.0 or newer) settings file:
 ```json
 {
   "relay_http": "https://tq-relay-1.haffi.dev",
-  "av": "robot-01",
+  "room": "robot-01",
   "role": "operator",
   "secret": "<terraform output -raw shared_secret>"
 }

@@ -3,6 +3,7 @@
 //! and applies teleop commands from the operator behind a dead-man switch.
 
 mod config;
+mod edges;
 mod source;
 mod teleop;
 mod uplink;
@@ -36,8 +37,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(url) = args.relay_url {
         cfg.relay_url = url;
     }
-    tracing::info!(%build, av_id = %cfg.av_id, relay = %cfg.relay_url, cameras = cfg.cameras.len(), "starting publisher");
+    tracing::info!(%build, room_id = %cfg.room_id, relay = %cfg.relay_url, cameras = cfg.cameras.len(), "starting publisher");
 
+    let edges = edges::Edges::new();
     let cameras: Vec<Arc<source::Camera>> = cfg
         .cameras
         .iter()
@@ -48,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
                 config: c.clone(),
                 track: tq_transport::track::Track::new(),
                 stats: Default::default(),
+                edges: edges.clone(),
             })
         })
         .collect();
@@ -55,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(source::run(cam.clone()));
     }
 
-    let teleop = teleop::Teleop::new(cfg.teleop.clone(), Arc::new(teleop::LoggingSink));
+    let teleop = teleop::Teleop::new(cfg.teleop.clone(), Arc::new(teleop::LoggingSink), edges.clone());
     let ticker = teleop.clone();
     tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_millis(20));
@@ -70,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         cfg,
         cameras,
         teleop,
+        edges,
     });
     tokio::select! {
         _ = uplink.run() => {}

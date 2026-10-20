@@ -4,6 +4,10 @@
 export const STREAM_TYPE_GROUP = 0x01;
 /** Group stream header version (the framing, not the protocol). */
 export const VERSION = 1;
+/** The room's events stream; see crates/tq-proto/src/room.rs. */
+export const STREAM_TYPE_EVENTS = 0x02;
+export const EVENTS_VERSION = 1;
+export const MAX_ROOM_MESSAGE_LEN = 1 << 20;
 
 export interface ProtocolVersion {
   major: number;
@@ -11,7 +15,7 @@ export interface ProtocolVersion {
 }
 
 /** The protocol this build speaks; see crates/tq-proto/src/version.rs. */
-export const PROTOCOL: ProtocolVersion = { major: 1, minor: 1 };
+export const PROTOCOL: ProtocolVersion = { major: 2, minor: 0 };
 /** What a peer without build info speaks. */
 export const PROTOCOL_LEGACY: ProtocolVersion = { major: 1, minor: 0 };
 
@@ -120,17 +124,57 @@ export interface PublisherStatus {
   quic: QuicStats | null;
 }
 
-export interface RelayState {
-  av_id: string;
-  publisher: PublisherStatus | null;
-  operator: string | null;
-  viewers: number;
-  operators: number;
+export interface ParticipantInfo {
+  session: string;
+  role: Role;
+  sub: string;
+  build: BuildInfo;
+  joined_us: number;
 }
 
+export interface TrackInfo {
+  camera: CameraInfo;
+  online: boolean;
+}
+
+export interface RoomState {
+  room_id: string;
+  publisher: PublisherStatus | null;
+  /** In announce order: a track's index is the `camera` on group streams. */
+  tracks: TrackInfo[];
+  participants: ParticipantInfo[];
+  operator: string | null;
+}
+
+export type RoomEventBody =
+  | { type: 'participant_joined'; participant: ParticipantInfo }
+  | { type: 'participant_left'; participant: ParticipantInfo }
+  | { type: 'publisher_connected'; publisher_id: string; build: BuildInfo | null }
+  | { type: 'publisher_disconnected'; publisher_id: string; reason: 'disconnected' | 'replaced' }
+  | { type: 'track_published'; track: TrackInfo }
+  | { type: 'track_updated'; track: TrackInfo }
+  | { type: 'track_unpublished'; camera: string; reason: string }
+  | { type: 'track_online'; camera: string }
+  | { type: 'track_offline'; camera: string; reason: string }
+  | {
+      type: 'operator_changed';
+      from: string | null;
+      to: string | null;
+      reason: 'claimed' | 'forced' | 'released' | 'left';
+    }
+  | { type: 'deadman_tripped'; reason: string }
+  | { type: 'deadman_cleared' };
+
+/**
+ * On the events stream: the room as of event `seq`, or the next event.
+ * Events at or below the last state's `seq` are never sent.
+ */
+export type RoomMessage =
+  | { type: 'state'; seq: number; state: RoomState }
+  | { type: 'event'; seq: number; ts_us: number; event: RoomEventBody };
+
 export type Control =
-  | { type: 'welcome'; session: string; role: Role; state: RelayState; relay?: BuildInfo | null }
-  | { type: 'state'; state: RelayState }
+  | { type: 'welcome'; session: string; role: Role; relay?: BuildInfo | null }
   | { type: 'claim_result'; ok: boolean; holder: string | null; reason: string | null }
   | { type: 'link_stats'; quic: QuicStats }
   | { type: 'hello'; build: BuildInfo }
@@ -193,6 +237,10 @@ export function encodeControl(msg: Control): Uint8Array {
 
 export function decodeControl(json: Uint8Array): Control {
   return JSON.parse(decoder.decode(json)) as Control;
+}
+
+export function decodeRoomMessage(json: Uint8Array): RoomMessage {
+  return JSON.parse(decoder.decode(json)) as RoomMessage;
 }
 
 export function encodeCommand(seq: number, sentUs: number, body: unknown): Uint8Array {

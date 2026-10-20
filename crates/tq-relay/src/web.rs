@@ -45,7 +45,7 @@ pub async fn serve(relay: Arc<Relay>, cfg: Config) -> anyhow::Result<()> {
     let mut app = Router::new()
         .route("/api/cert", get(cert))
         .route("/api/info", get(info))
-        .route("/api/avs", get(avs))
+        .route("/api/rooms", get(rooms))
         .route("/api/dev/token", get(dev_token))
         .with_state(relay);
     if !cfg.cors_origins.is_empty() {
@@ -97,15 +97,15 @@ async fn info(State(relay): State<Arc<Relay>>) -> impl IntoResponse {
     }))
 }
 
-async fn avs(State(relay): State<Arc<Relay>>) -> impl IntoResponse {
-    let avs: Vec<_> = relay.avs.lock().unwrap().values().cloned().collect();
-    Json(avs.iter().map(|a| a.state()).collect::<Vec<_>>())
+async fn rooms(State(relay): State<Arc<Relay>>) -> impl IntoResponse {
+    let rooms: Vec<_> = relay.rooms.lock().unwrap().values().cloned().collect();
+    Json(rooms.iter().map(|r| r.state()).collect::<Vec<_>>())
 }
 
 #[derive(Deserialize)]
 struct TokenQuery {
     role: Role,
-    av: String,
+    room: String,
     #[serde(default)]
     sub: Option<String>,
 }
@@ -122,7 +122,7 @@ async fn dev_token(State(relay): State<Arc<Relay>>, Query(q): Query<TokenQuery>)
     let claims = Claims {
         sub: q.sub.unwrap_or_else(|| format!("dev-{}", q.role)),
         role: q.role,
-        av: q.av,
+        room: q.room,
         exp: now_us() / 1_000_000 + 12 * 3600,
     };
     Json(serde_json::json!({ "token": sign_token(relay.secret.as_bytes(), &claims) })).into_response()
