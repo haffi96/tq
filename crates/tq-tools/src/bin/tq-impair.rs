@@ -8,7 +8,7 @@
 //! tq-publisher --relay-url https://127.0.0.1:4444  ->  tq-impair :4444  ->  tq-relay :4443
 //! ```
 //!
-//! "up" is client -> upstream (the vehicle uplink when the publisher is the
+//! "up" is client -> upstream (the robot uplink when the publisher is the
 //! client), "down" is upstream -> client.
 
 use std::{

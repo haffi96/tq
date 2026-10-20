@@ -13,7 +13,7 @@ pub struct Claims {
     /// Who this is (shown in the UI and logs).
     pub sub: String,
     pub role: Role,
-    /// AV the token is valid for, or `*`.
+    /// Robot (av id) the token is valid for, or `*`.
     pub av: String,
     /// Expiry, Unix seconds.
     pub exp: u64,

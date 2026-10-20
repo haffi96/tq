@@ -1,6 +1,6 @@
-//! Teleop command handling and the AV-side dead-man switch.
+//! Teleop command handling and the robot-side dead-man switch.
 //!
-//! The vehicle is safe-stopped (tripped) unless an operator is attached and
+//! The robot is safe-stopped (tripped) unless an operator is attached and
 //! alive. It trips when:
 //! - there is no operator (initially, on release, or a new operator who has
 //!   not sent anything yet);
@@ -29,7 +29,7 @@ pub struct TeleopCommand {
     pub args: serde_json::Value,
 }
 
-/// Where accepted commands go. The vehicle interface is not part of this
+/// Where accepted commands go. The robot interface is not part of this
 /// repo; [`LoggingSink`] stands in for it.
 pub trait TeleopSink: Send + Sync {
     fn apply(&self, cmd: &TeleopCommand) -> Result<(), String>;

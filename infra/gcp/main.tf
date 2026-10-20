@@ -34,7 +34,7 @@ resource "google_compute_subnetwork" "tq" {
 
 # Standard tier: traffic enters and leaves Google's network near London
 # rather than at the edge closest to the peer. Cheaper egress, and for UK
-# vehicles and operators the path is the same.
+# robots and operators the path is the same.
 resource "google_compute_address" "relay" {
   name         = local.name
   region       = var.region

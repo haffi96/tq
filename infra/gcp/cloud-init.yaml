@@ -8,7 +8,7 @@
 #   tq-cert     certbot (DNS-01 via Cloudflare) -> /var/lib/tq/certs
 #   tq-relay    docker run --network host, QUIC on udp/443, HTTPS on tcp/443
 # tq-cert-renew.timer re-runs tq-cert daily and restarts the relay when the
-# certificate changed (live sessions drop; the vehicle's dead-man trips).
+# certificate changed (live sessions drop; the robot's dead-man trips).
 
 bootcmd:
   # The relay runs as nobody and binds 443 in the host network namespace.

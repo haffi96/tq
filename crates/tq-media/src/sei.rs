@@ -1,7 +1,7 @@
 use crate::{bits::unescape_rbsp, nal::NalInfo, Codec};
 
-/// UUID of the `user_data_unregistered` SEI that gstreamer-source and the
-/// LiveKit publisher tooling put in front of every access unit.
+/// UUID of the `user_data_unregistered` SEI that gstreamer-source puts in
+/// front of every access unit.
 pub const SEI_UUID: [u8; 16] = [
     0x3f, 0xa8, 0x5f, 0x64, 0x57, 0x17, 0x45, 0x62, 0xb3, 0xfc, 0x2c, 0x96, 0x3f, 0x66, 0xaf, 0xa6,
 ];
@@ -21,8 +21,7 @@ pub struct SeiTimestamp {
 /// carries one.
 ///
 /// Payload: `UUID(16) | TLV... | trailer_len | "LKTS"`, where every TLV byte
-/// and `trailer_len` are XORed with 0xFF (the LiveKit packet trailer
-/// format). The RBSP is unescaped first; gstreamer-source does not insert
+/// and `trailer_len` are XORed with 0xFF. The RBSP is unescaped first; gstreamer-source does not insert
 /// emulation prevention bytes, so the raw payload is tried as a fallback.
 pub fn parse_lkts(codec: Codec, nal: &[u8]) -> Option<SeiTimestamp> {
     if !NalInfo::parse(codec, nal)?.is_prefix_sei() {

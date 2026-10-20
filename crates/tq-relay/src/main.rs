@@ -1,11 +1,11 @@
-//! tq-relay: the meeting point between the vehicle and browsers.
+//! tq-relay: the meeting point between the robot and browsers.
 //!
 //! One WebTransport endpoint serves both sides:
-//! - `/v1/publish/{av}`: the vehicle publisher (publisher token);
+//! - `/v1/publish/{av}`: the robot publisher (publisher token);
 //! - `/v1/session/{av}`: browser operators and viewers (role in the token).
 //!
 //! Video is fanned out per camera from a GOP cache with a per-role drop
-//! policy; teleop datagrams pass between the claim holder and the vehicle.
+//! policy; teleop datagrams pass between the claim holder and the robot.
 
 mod av;
 mod client;

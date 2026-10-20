@@ -7,7 +7,7 @@ browser ── https://tq.haffi.dev ──────────────�
    │
    ├── https://tq-relay-1.haffi.dev/api/*  (TCP 443)  ┐
    └── WebTransport tq-relay-1.haffi.dev   (UDP 443)  ├► GCE VM: COS + docker, relay image
-vehicle ── tq-publisher ── QUIC            (UDP 443)  ┘   Let's Encrypt cert (DNS-01, Cloudflare)
+robot ──── tq-publisher ── QUIC            (UDP 443)  ┘   Let's Encrypt cert (DNS-01, Cloudflare)
 ```
 
 What Terraform creates:
@@ -124,7 +124,7 @@ tq-app (0.3.0 or newer) settings file:
 | Change machine type | `machine_type`, `terraform apply` (stops and starts the VM) |
 
 Restarting the relay, which includes a certificate renewal (about every 60
-days), drops every session. The vehicle's dead-man switch trips, clients
+days), drops every session. The robot's dead-man switch trips, clients
 reconnect, and the operator has to claim again.
 
 ## Cost (London, approximate)

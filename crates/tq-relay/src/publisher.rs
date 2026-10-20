@@ -1,4 +1,4 @@
-//! The vehicle publisher's session.
+//! The robot publisher's session.
 
 use std::{
     sync::{atomic::Ordering::Relaxed, Arc},

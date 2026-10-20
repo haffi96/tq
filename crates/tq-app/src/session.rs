@@ -117,7 +117,7 @@ pub struct Teleop {
     pub heartbeat_rtt: Win,
     pub acks: HashMap<String, u64>,
     pub last_ack_detail: Option<String>,
-    /// Vehicle dead-man state as seen in heartbeat echoes.
+    /// Robot dead-man state as seen in heartbeat echoes.
     pub tripped: Option<bool>,
 }
 
@@ -492,7 +492,7 @@ async fn read_datagrams(shared: Arc<Shared>, session: Session) -> anyhow::Result
 }
 
 /// Operator heartbeats (100 ms) and drive commands (20 Hz while active).
-/// Stopping the commands lets the vehicle trip its dead-man after
+/// Stopping the commands lets the robot trip its dead-man after
 /// `command_stale_ms`, by design.
 async fn send_teleop(shared: Arc<Shared>, session: Session) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(TELEOP);
