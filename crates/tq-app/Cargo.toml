@@ -2,7 +2,7 @@
 name = "tq-app"
 description = "Native operator / viewer app: GPUI window, VideoToolbox decode, the tq protocol in-process"
 # Released on its own: tags `app-vX.Y.Z` (see docs/install.md).
-version = "0.3.1"
+version = "0.3.2"
 edition.workspace = true
 publish.workspace = true
 build = "../../build/version.rs"
