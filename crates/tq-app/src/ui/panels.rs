@@ -229,7 +229,7 @@ impl Sidebar {
         } else {
             acks.join(" · ")
         };
-        let vehicle = match t.tripped {
+        let robot = match t.tripped {
             None => "–",
             Some(true) => "tripped",
             Some(false) => "armed",
@@ -355,7 +355,7 @@ impl Sidebar {
                     .child(kv("ack rtt", format!("{} ms", m.teleop_rtt.0), cx))
                     .child(kv("heartbeat rtt", format!("{} ms", m.teleop_rtt.1), cx))
                     .child(kv("acks", acks, cx))
-                    .child(kv("vehicle (heartbeat echo)", vehicle, cx))
+                    .child(kv("robot (heartbeat echo)", robot, cx))
                     .children(last_ack.map(|d| kv("last ack", d, cx))),
             )
             .into_any_element()
@@ -419,7 +419,7 @@ impl Sidebar {
                     .gap_6()
                     .pt_1()
                     .child(metric(
-                        "Vehicle RTT",
+                        "Robot RTT",
                         pub_rtt,
                         "ms",
                         Level::of_ms(pub_rtt, 80., 200.).color(cx),

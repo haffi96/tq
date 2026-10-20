@@ -5,7 +5,8 @@
 #   dev/run-local.sh                 # direct
 #   IMPAIR=starlink dev/run-local.sh # publisher uplink through the Starlink profile
 #
-# Needs streaming-tools (branch h265) next to this repo, or STREAMING_TOOLS=...
+# Needs streaming-tools (https://github.com/haffi96/streaming-tools) next to
+# this repo, or STREAMING_TOOLS=...
 # Ctrl+C stops everything.
 set -euo pipefail
 cd "$(dirname "$0")/.."

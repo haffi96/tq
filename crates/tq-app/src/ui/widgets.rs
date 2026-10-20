@@ -39,7 +39,7 @@ impl Level {
     }
 }
 
-/// A colored dot and a label: connection and vehicle states.
+/// A colored dot and a label: connection and robot states.
 pub fn status(label: impl Into<SharedString>, color: Hsla) -> impl IntoElement {
     h_flex()
         .gap_1p5()

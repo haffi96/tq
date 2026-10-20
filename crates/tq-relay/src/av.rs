@@ -1,4 +1,4 @@
-//! Per-AV state on the relay.
+//! Per-robot state on the relay.
 
 use std::{
     collections::HashMap,

@@ -1,6 +1,6 @@
 [package]
 name = "tq-relay"
-description = "Cloud relay: accepts the vehicle publisher and browser operators/viewers over WebTransport, fans out GOP streams, routes teleop"
+description = "Cloud relay: accepts the robot publisher and browser operators/viewers over WebTransport, fans out GOP streams, routes teleop"
 # Released on its own: tags `relay-vX.Y.Z` (see docs/install.md).
 version = "0.2.0"
 edition.workspace = true

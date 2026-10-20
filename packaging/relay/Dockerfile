@@ -31,7 +31,7 @@ COPY --from=relay /usr/local/bin/tq-relay /usr/local/bin/tq-relay
 COPY --from=web /src/web/dist /usr/share/tq/web
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="tq-relay" \
-      org.opencontainers.image.description="tq relay: WebTransport fan-out for vehicle video and teleop, with the web app" \
+      org.opencontainers.image.description="tq relay: WebTransport fan-out for robot video and teleop, with the web app" \
       org.opencontainers.image.source="https://github.com/haffi96/tq" \
       org.opencontainers.image.version="$VERSION"
 # IPv4 by default: containers often have IPv6 disabled, and [::] would not

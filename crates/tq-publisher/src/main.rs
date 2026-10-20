@@ -1,4 +1,4 @@
-//! tq-publisher: runs on the vehicle. Reads each camera's pre-encoded
+//! tq-publisher: runs on the robot. Reads each camera's pre-encoded
 //! H.264/H.265 TCP stream, sends it to the relay one QUIC stream per GOP,
 //! and applies teleop commands from the operator behind a dead-man switch.
 

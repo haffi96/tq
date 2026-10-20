@@ -1,6 +1,6 @@
 [package]
 name = "tq-publisher"
-description = "Vehicle-side publisher: TCP H.264/H.265 camera streams -> QUIC relay, teleop datagrams -> dead-man guarded sink"
+description = "Robot-side publisher: TCP H.264/H.265 camera streams -> QUIC relay, teleop datagrams -> dead-man guarded sink"
 # Released on its own: tags `publisher-vX.Y.Z` (see docs/install.md).
 version = "0.1.0"
 edition.workspace = true

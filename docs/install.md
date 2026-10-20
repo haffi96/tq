@@ -305,7 +305,7 @@ Installing an update:
 
 Nothing is replaced if any check fails. Two limits:
 - Updating is disabled while you hold the operator claim. The restart drops
-  the session, which would trip the vehicle's dead-man switch mid-drive.
+  the session, which would trip the robot's dead-man switch mid-drive.
 - The app has to be somewhere you can write to, such as `/Applications` for
   an admin user on macOS, or `~/.local/bin` on Linux. A build run from
   cargo's `target/` does not update itself.

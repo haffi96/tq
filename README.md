@@ -2,19 +2,19 @@
 
 # tq: teleop over QUIC
 
-Low-latency teleoperation video and control over WebTransport (QUIC), built
-as an alternative to a LiveKit/WebRTC path.
+Low-latency robot teleoperation, video and control, over WebTransport (QUIC)
+instead of WebRTC.
 
 - Pre-encoded H.264/H.265 camera streams arrive over TCP and are never
-  decoded or re-encoded on the way. (This mirrors the production AV encoder
-  process; locally it is `gstreamer-source`.)
-- One relay serves the vehicle, the operator and any number of viewers.
+  decoded or re-encoded on the way. (Locally the encoder is `gstreamer-source`
+  from [streaming-tools](https://github.com/haffi96/streaming-tools).)
+- One relay serves the robot, the operator and any number of viewers.
 - The browser decodes with WebCodecs and draws every frame as soon as it is
   decoded. There is no jitter buffer.
-- Teleop runs over QUIC datagrams, with a dead-man switch on the vehicle side.
+- Teleop runs over QUIC datagrams, with a dead-man switch on the robot side.
 
 ```text
- Vehicle (Starlink)                          Cloud relay                         Browsers
+ Robot (Starlink)                            Cloud relay                         Browsers
  encoder --TCP--> tq-publisher ==QUIC/WT==> tq-relay ==WebTransport==> operator (drops aggressively)
  H.264/H.265      AU assembly,   GOP streams  GOP cache, fan-out,        \=> viewers (looser policy)
  Annex B / AVC    teleop sink    datagrams    claim/lease, auth, HTTP
@@ -25,15 +25,15 @@ as an alternative to a LiveKit/WebRTC path.
 
 | Path | What it is |
 | --- | --- |
-| `crates/tq-media` | Elementary stream handling: NAL framing (Annex B or 4-byte length-prefixed, auto-detected), access unit assembly, LKTS SEI capture timestamps, codec strings, parameter set repetition. No decoding. |
+| `crates/tq-media` | Elementary stream handling: NAL framing (Annex B or 4-byte length-prefixed, auto-detected), access unit assembly, SEI capture timestamps, codec strings, parameter set repetition. No decoding. |
 | `crates/tq-proto` | Wire format: GOP stream and frame headers, JSON control messages, teleop datagrams, HS256 tokens. `web/src/protocol.ts` mirrors it. |
 | `crates/tq-transport` | quinn / web-transport-quinn endpoints (BBR, bounded send window), certificates, the per-camera GOP cache (`Track`), the GOP stream sender with its drop policy, and the reader. |
-| `crates/tq-publisher` | Vehicle binary: reads the TCP sources, uplinks to the relay, runs the teleop sink and dead-man. |
+| `crates/tq-publisher` | Robot-side binary: reads the TCP sources, uplinks to the relay, runs the teleop sink and dead-man. |
 | `crates/tq-relay` | Relay binary: WebTransport for the publisher and browsers, HTTP for the app, `/api/cert` and dev tokens. |
 | `crates/tq-tools` | `tq-impair` (Starlink-like UDP impairment proxy) and `tq-probe` (headless operator/viewer that reports per-hop latency). |
 | `crates/tq-app` | Native operator/viewer app (GPUI; VideoToolbox on macOS, NVDEC on Linux), replacing `web/`. Not built by a plain `cargo build`. |
 | `web/` | Browser app in TypeScript, built with bun. `worker.ts` owns WebTransport, WebCodecs and OffscreenCanvas; `main.ts` is the UI. |
-| `config/` | Publisher configs: `publisher.example.json` (H.264 + H.265 test sources), `publisher.prodlike.json` (H.265, 10 fps, 2 Mbps, like production). |
+| `config/` | Publisher configs: `publisher.example.json` (H.264 + H.265 test sources), `publisher.prodlike.json` (one H.265 camera, 10 fps, 2 Mbps, length-prefixed, like a typical robot camera). |
 | `dev/run-local.sh` | Starts the whole stack on one machine. |
 | `dev/release.sh` | Bumps a component's version; CI uses it to check tags and write release notes. |
 | `build/version.rs` | Build script shared by the binaries: stamps the git commit into `--version` and the handshake. |
@@ -58,11 +58,12 @@ Prerequisites:
 - Rust 1.85 or newer
 - bun
 - Chrome or Edge, version 120 or newer. HEVC needs a hardware decoder (VideoToolbox on macOS).
-- `streaming-tools` on branch `h265`, checked out next to this repo.
+- [streaming-tools](https://github.com/haffi96/streaming-tools), checked out next to this repo
+  (or set `STREAMING_TOOLS=/path/to/streaming-tools`). It provides `gstreamer-source`, the test encoder.
 
 ```bash
 dev/run-local.sh                    # direct
-IMPAIR=starlink dev/run-local.sh    # vehicle uplink through the Starlink profile
+IMPAIR=starlink dev/run-local.sh    # robot uplink through the Starlink profile
 IMPAIR=starlink-bad dev/run-local.sh
 ```
 
@@ -73,7 +74,7 @@ Then open:
 Operator controls:
 - **Claim**, then hold `W`/`A`/`S`/`D` to drive (commands at 20 Hz).
 - **stream 20 Hz** keeps commands flowing without a key held.
-- `Space` releases the claim, so the vehicle trips immediately.
+- `Space` releases the claim, so the robot trips immediately.
 
 ### Native app (macOS, Linux)
 
@@ -186,7 +187,7 @@ The publisher completes an access unit as soon as it knows the AU is over:
   `gstreamer-source --au-terminator`, on by default, appends one to every
   AU. Without it, each frame waits until the next frame starts, which is a
   full frame interval: 100 ms at 10 fps.
-- Production encoders that emit one slice per frame and no AUD terminator
+- Encoders that emit one slice per frame and no AUD terminator
   can set `"complete_on_vcl": true` on the camera to get the same effect.
 
 ## Protocol (v1)
@@ -246,11 +247,11 @@ keyframe.
 There is no encoder control hook: the encoder is a separate process. A skip
 therefore recovers at the encoder's periodic IDR (1 s in gstreamer-source).
 Keyframe requests are still sent all the way to the publisher, which logs
-them, so a production hook can be added there.
+them, so an encoder hook can be added there.
 
 ### Teleop and dead-man (publisher)
 
-Commands are latest-wins by `seq`. The vehicle is safe-stopped (tripped)
+Commands are latest-wins by `seq`. The robot is safe-stopped (tripped)
 whenever any of these is true:
 - there is no operator, or the operator changes;
 - no heartbeat has arrived for `heartbeat_loss_ms` (500);
@@ -258,7 +259,7 @@ whenever any of these is true:
 - the relay connection drops.
 
 It stays tripped until the next accepted command. `LoggingSink` stands in
-for the vehicle interface (`TeleopSink`).
+for the robot interface (`TeleopSink`).
 
 ## Measuring
 
@@ -267,8 +268,8 @@ Both the page overlay and `tq-probe` report latency per hop. Each line is
 
 | Line | Measured from → to | Clock(s) |
 | --- | --- | --- |
-| `capture→pub` | SEI capture timestamp → publisher has the whole access unit. Covers the camera pipeline after the driver timestamp, encode, TCP and AU assembly. | vehicle only |
-| `pub→relay` | publisher → relay received the frame (the uplink) | vehicle ↔ relay offset |
+| `capture→pub` | SEI capture timestamp → publisher has the whole access unit. Covers the camera pipeline after the driver timestamp, encode, TCP and AU assembly. | robot only |
+| `pub→relay` | publisher → relay received the frame (the uplink) | robot ↔ relay offset |
 | `relay→browser` | relay → the frame's last byte read in the worker | relay ↔ browser offset |
 | `decode` | `VideoDecoder.decode()` → output callback | browser only, exact |
 | `capture→drawn` | capture → `drawImage` returned | both offsets |
@@ -289,7 +290,7 @@ below) and pass the result as `?sensor_ms=`.
 
 ### Glass to glass without clock sync
 
-- **Optical, one clock.** Point the vehicle camera at a millisecond clock
+- **Optical, one clock.** Point the robot camera at a millisecond clock
   that sits next to the operator display, then take one photo (or a phone
   slow-motion video) of both. The difference between the two clock readings
   is the true glass to glass. Use it to calibrate `?sensor_ms=`.
@@ -298,7 +299,7 @@ below) and pass the result as `?sensor_ms=`.
   detects that change in the decoded video. This is a round trip on the
   browser's clock alone, so no sync is needed, and it is the latency an
   operator actually feels.
-- **Disciplined clocks.** GPS PPS + chrony on the vehicle, and chrony
+- **Disciplined clocks.** GPS PPS + chrony on the robot, and chrony
   against the cloud provider's time service on the relay and operator
   machines. This gets the wall clocks within about 1 ms, and the in-band
   offsets then only cross-check them.
@@ -335,6 +336,6 @@ RTT does.
   periodic IDR.
 - No WebSocket/qmux fallback for browsers without WebTransport (Safari).
 - Only the relay can mint tokens. There is no registry or discovery: one
-  relay serves AVs by id from the URL.
+  relay serves robots by id from the URL.
 - Relay HTTP is plain HTTP. Remote browsers need HTTPS in front of it, or
   a real certificate.

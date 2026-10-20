@@ -156,7 +156,7 @@ impl Model {
     }
 
     /// Downloads and swaps in the available release, then restarts. Refused
-    /// while driving: the restart drops the session, and the vehicle would
+    /// while driving: the restart drops the session, and the robot would
     /// trip its dead-man mid-drive.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         let UpdateState::Available(release) = self.update.clone() else {
@@ -314,7 +314,7 @@ impl Model {
         cx.notify();
     }
 
-    /// Emergency stop: drop the claim; the vehicle trips at once.
+    /// Emergency stop: drop the claim; the robot trips at once.
     pub fn estop(&mut self, cx: &mut Context<Self>) {
         self.keys.clear();
         self.streaming = false;

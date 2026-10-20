@@ -216,7 +216,7 @@ function driveCommand() {
 }
 
 // 20 Hz while a key is held or "stream" is on. Stopping the stream lets the
-// AV trip its dead-man after command_stale_ms, by design.
+// robot trip its dead-man after command_stale_ms, by design.
 setInterval(() => {
   if (role !== 'operator') return;
   const active = keys.size > 0 || streaming;
@@ -245,7 +245,7 @@ function setupOperator() {
       e.preventDefault();
     }
     if (k === ' ') {
-      // Emergency stop: drop the claim; the AV trips immediately.
+      // Emergency stop: drop the claim; the robot trips immediately.
       keys.clear();
       streaming = false;
       stream.checked = false;
@@ -281,7 +281,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
           `acks ${Object.entries(t.acks)
             .map(([k, v]) => `${k}=${v}`)
             .join(' ') || '–'}${t.lastAckDetail ? `   last: ${t.lastAckDetail}` : ''}`,
-          `vehicle (via heartbeat echo): ${t.tripped === null ? '–' : t.tripped ? 'tripped' : 'armed'}`,
+          `robot (via heartbeat echo): ${t.tripped === null ? '–' : t.tripped ? 'tripped' : 'armed'}`,
         ].join('\n');
       }
       break;

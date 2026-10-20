@@ -69,7 +69,7 @@ pub struct CameraStatus {
     pub capture_to_publisher_ms: Option<f64>,
 }
 
-/// The AV-side teleop / dead-man state.
+/// The robot-side teleop / dead-man state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeleopStatus {
     /// Safe-stopped; stays tripped until the next accepted command.
