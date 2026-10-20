@@ -1,5 +1,5 @@
 {
-  "av_id": "robot-01",
+  "room_id": "robot-01",
   "relay_url": "https://tq-relay-1.haffi.dev:443",
   "relay_trust": {
     "mode": "system_roots"

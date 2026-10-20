@@ -2,11 +2,15 @@
 //! version ([`PROTOCOL`]) is separate from each component's version; see
 //! [`version`].
 //!
-//! Every hop (publisher -> relay -> browser) is a WebTransport session and
-//! uses the same three channels:
+//! Every hop (publisher -> relay -> browser) is a WebTransport session in a
+//! room ([`room`]) and uses the same four channels:
 //!
 //! - **Control stream**: the first bidirectional stream, opened by the
-//!   client. Length-prefixed JSON messages ([`control`]).
+//!   client. Length-prefixed JSON messages ([`control`]) about the session
+//!   itself.
+//! - **Events stream**: one unidirectional stream per session ([`room`]):
+//!   the room's state and its sequenced events. It and the control stream
+//!   are sent ahead of video.
 //! - **Group streams**: one unidirectional stream per camera per GOP
 //!   ([`media`]). A group starts with a keyframe; frames follow in decode
 //!   order. Newer groups get a higher send priority, and a sender may reset
@@ -20,12 +24,14 @@
 pub mod control;
 pub mod datagram;
 pub mod media;
+pub mod room;
 pub mod token;
 pub mod version;
 
 pub use control::*;
 pub use datagram::*;
 pub use media::*;
+pub use room::*;
 pub use token::*;
 pub use version::*;
 

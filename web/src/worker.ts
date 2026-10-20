@@ -1,5 +1,5 @@
-// Media worker: owns the WebTransport session, reads every camera's GOP
-// streams, decodes them with WebCodecs and draws each frame on its
+// Media worker: owns the WebTransport session, reads the room's events
+// stream and every camera's GOP streams, decodes them with WebCodecs and draws each frame on its
 // OffscreenCanvas the moment it is decoded. No jitter buffer: a frame is
 // shown as soon as it is complete. Teleop datagrams also go out from here
 // so they never wait behind the UI thread.
@@ -10,16 +10,22 @@ import {
   type Control,
   type GroupHeader,
   type Role,
+  type RoomMessage,
+  EVENTS_VERSION,
   FLAG_CAPTURE_FROM_SEI,
   FLAG_KEY,
   FRAME_HEADER_LEN,
   GROUP_HEADER_FIXED,
   MAX_FRAME_LEN,
+  MAX_ROOM_MESSAGE_LEN,
+  STREAM_TYPE_EVENTS,
+  STREAM_TYPE_GROUP,
   StreamReader,
   decodeControl,
   decodeDatagram,
   decodeFrameHeader,
   decodeGroupFixed,
+  decodeRoomMessage,
   encodeCommand,
   encodeControl,
   encodeHeartbeat,
@@ -28,8 +34,7 @@ import {
 import { WEB_BUILD } from './version';
 
 export type ToWorker =
-  // hello: the relay reported a build, so it knows the `hello` message.
-  | { type: 'connect'; url: string; certHash: string | null; role: Role; sensorMs: number; hello: boolean }
+  | { type: 'connect'; url: string; certHash: string | null; role: Role; sensorMs: number }
   | { type: 'canvas'; camera: string; canvas: OffscreenCanvas }
   | { type: 'control'; msg: Control }
   | { type: 'teleop'; command: string; args: unknown };
@@ -68,6 +73,7 @@ export interface CameraStats {
 export type FromWorker =
   | { type: 'status'; state: 'connecting' | 'connected' | 'closed'; detail?: string }
   | { type: 'control'; msg: Control }
+  | { type: 'room'; msg: RoomMessage }
   | {
       type: 'stats';
       cameras: Record<string, CameraStats>;
@@ -388,8 +394,8 @@ let datagramWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let cameraList: CameraInfo[] = [];
 const cameras = new Map<string, Camera>();
 const canvases = new Map<string, OffscreenCanvas>();
-let connectArgs: { url: string; certHash: string | null; hello: boolean } | null = null;
-// Group streams can overtake the welcome message; they wait for the camera
+let connectArgs: { url: string; certHash: string | null } | null = null;
+// Group streams can overtake the room's state; they wait for the camera
 // list rather than being dropped (which would lose the cached GOP).
 let camerasKnown: () => void = () => {};
 let camerasReady = new Promise<void>((resolve) => (camerasKnown = resolve));
@@ -439,12 +445,6 @@ async function readControl(stream: ReadableStream<Uint8Array>) {
     if (!json) return;
     const msg = decodeControl(json);
     switch (msg.type) {
-      case 'welcome':
-      case 'state':
-        clock.pubOffsetUs = msg.state.publisher?.clock_offset_us ?? null;
-        clock.pubErrorUs = msg.state.publisher?.clock_error_us ?? null;
-        if (msg.state.publisher) setCameras(msg.state.publisher.cameras);
-        break;
       case 'pong': {
         const t3 = nowUs();
         const relayMinusMe = msg.t1_us - (msg.t0_us + t3) / 2;
@@ -459,11 +459,41 @@ async function readControl(stream: ReadableStream<Uint8Array>) {
   }
 }
 
-async function readGroup(stream: ReadableStream<Uint8Array>) {
+// The room's state and its events; the state brings the camera list and
+// the publisher's clock offset.
+async function readEvents(r: StreamReader) {
+  const version = await r.readExact(1);
+  if (!version || version[0] !== EVENTS_VERSION) throw new Error(`unsupported events stream version ${version?.[0]}`);
+  for (;;) {
+    const len = await r.readExact(4);
+    if (!len) return;
+    const n = new DataView(len.buffer, len.byteOffset, 4).getUint32(0);
+    if (n === 0 || n > MAX_ROOM_MESSAGE_LEN) throw new Error(`bad room message length ${n}`);
+    const json = await r.readExact(n);
+    if (!json) return;
+    const msg = decodeRoomMessage(json);
+    if (msg.type === 'state') {
+      clock.pubOffsetUs = msg.state.publisher?.clock_offset_us ?? null;
+      clock.pubErrorUs = msg.state.publisher?.clock_error_us ?? null;
+      setCameras(msg.state.tracks.map((t) => t.camera));
+    }
+    post({ type: 'room', msg });
+  }
+}
+
+// A unidirectional stream: the events stream or a GOP, by its type byte.
+async function readStream(stream: ReadableStream<Uint8Array>) {
   const r = new StreamReader(stream);
   try {
-    const fixed = await r.readExact(GROUP_HEADER_FIXED);
-    if (!fixed) return;
+    const type = await r.readExact(1);
+    if (!type) return;
+    if (type[0] === STREAM_TYPE_EVENTS) return await readEvents(r);
+    if (type[0] !== STREAM_TYPE_GROUP) throw new Error(`unknown stream type ${type[0]}`);
+    const rest = await r.readExact(GROUP_HEADER_FIXED - 1);
+    if (!rest) return;
+    const fixed = new Uint8Array(GROUP_HEADER_FIXED);
+    fixed[0] = type[0];
+    fixed.set(rest, 1);
     const { header, codecLen } = decodeGroupFixed(fixed);
     const codecBytes = codecLen ? await r.readExact(codecLen) : new Uint8Array();
     header.codec = new TextDecoder().decode(codecBytes ?? new Uint8Array());
@@ -491,12 +521,12 @@ async function readGroup(stream: ReadableStream<Uint8Array>) {
   }
 }
 
-async function readGroups(t: WebTransport) {
+async function readStreams(t: WebTransport) {
   const reader = t.incomingUnidirectionalStreams.getReader();
   for (;;) {
     const { value, done } = await reader.read();
     if (done) return;
-    void readGroup(value as ReadableStream<Uint8Array>);
+    void readStream(value as ReadableStream<Uint8Array>);
   }
 }
 
@@ -521,7 +551,7 @@ async function readDatagrams(t: WebTransport) {
 
 async function connect() {
   if (!connectArgs) return;
-  const { url, certHash, hello } = connectArgs;
+  const { url, certHash } = connectArgs;
   post({ type: 'status', state: 'connecting' });
   const options: WebTransportOptions & { congestionControl?: string } = {
     requireUnreliable: true,
@@ -540,11 +570,12 @@ async function connect() {
   const bidi = await t.createBidirectionalStream();
   controlWriter = bidi.writable.getWriter();
   datagramWriter = t.datagrams.writable.getWriter();
-  if (hello) sendControl({ type: 'hello', build: WEB_BUILD });
+  // The relay joins us to the room once it has our build.
+  sendControl({ type: 'hello', build: WEB_BUILD });
   post({ type: 'status', state: 'connected' });
 
   void readControl(bidi.readable).catch(() => {});
-  void readGroups(t).catch(() => {});
+  void readStreams(t).catch(() => {});
   void readDatagrams(t).catch(() => {});
 
   const ping = setInterval(() => sendControl({ type: 'ping', id: Date.now(), t0_us: nowUs() }), PING_MS);
@@ -602,7 +633,7 @@ scope.onmessage = (e) => {
     case 'connect':
       role = msg.role;
       sensorMs = msg.sensorMs;
-      connectArgs = { url: msg.url, certHash: msg.certHash, hello: msg.hello };
+      connectArgs = { url: msg.url, certHash: msg.certHash };
       void connect();
       break;
     case 'canvas': {

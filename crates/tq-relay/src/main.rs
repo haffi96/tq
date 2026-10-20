@@ -1,15 +1,20 @@
 //! tq-relay: the meeting point between the robot and browsers.
 //!
 //! One WebTransport endpoint serves both sides:
-//! - `/v1/publish/{av}`: the robot publisher (publisher token);
-//! - `/v1/session/{av}`: browser operators and viewers (role in the token).
+//! - `/v1/publish/{room}`: the robot publisher (publisher token);
+//! - `/v1/session/{room}`: operators and viewers (role in the token).
+//!
+//! Each robot has a room ([`room`]); its participants hear about every
+//! change in it as sequenced events.
 //!
 //! Video is fanned out per camera from a GOP cache with a per-role drop
 //! policy; teleop datagrams pass between the claim holder and the robot.
 
-mod av;
 mod client;
 mod publisher;
+mod room;
+#[cfg(test)]
+mod tests;
 mod web;
 
 use std::{
@@ -82,6 +87,10 @@ struct Args {
     /// Older GOPs a viewer may keep receiving after a new one starts.
     #[arg(long, default_value_t = 1)]
     viewer_keep_groups: usize,
+    /// Seconds a room keeps its tracks (offline) after the publisher drops,
+    /// before unpublishing them.
+    #[arg(long, default_value_t = 30)]
+    track_grace_secs: u64,
 }
 
 #[derive(Subcommand)]
@@ -91,7 +100,7 @@ enum Command {
         #[arg(long)]
         role: Role,
         #[arg(long)]
-        av: String,
+        room: String,
         #[arg(long, default_value = "cli")]
         sub: String,
         #[arg(long, default_value_t = 24)]
@@ -102,7 +111,8 @@ enum Command {
 pub struct Relay {
     pub build: BuildInfo,
     pub secret: String,
-    pub avs: Mutex<HashMap<String, Arc<av::Av>>>,
+    pub rooms: Mutex<HashMap<String, Arc<room::Room>>>,
+    pub track_grace: Duration,
     pub cert_hash: String,
     pub self_signed: bool,
     pub quic_port: u16,
@@ -113,12 +123,12 @@ pub struct Relay {
 }
 
 impl Relay {
-    fn av(&self, id: &str) -> Arc<av::Av> {
-        self.avs
+    fn room(&self, id: &str) -> Arc<room::Room> {
+        self.rooms
             .lock()
             .unwrap()
             .entry(id.to_string())
-            .or_insert_with(|| av::Av::new(id.to_string()))
+            .or_insert_with(|| room::Room::new(id.to_string(), self.track_grace))
             .clone()
     }
 }
@@ -136,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(Command::Token {
         role,
-        av,
+        room,
         sub,
         ttl_hours,
     }) = args.command
@@ -144,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         let claims = Claims {
             sub,
             role,
-            av,
+            room,
             exp: now_us() / 1_000_000 + ttl_hours * 3600,
         };
         println!("{}", sign_token(args.secret.as_bytes(), &claims));
@@ -167,7 +177,8 @@ async fn main() -> anyhow::Result<()> {
     let relay = Arc::new(Relay {
         build,
         secret: args.secret.clone(),
-        avs: Mutex::new(HashMap::new()),
+        rooms: Mutex::new(HashMap::new()),
+        track_grace: Duration::from_secs(args.track_grace_secs),
         cert_hash: cert.hash_hex(),
         self_signed: cert.self_signed,
         quic_port: args.quic.port(),
@@ -188,8 +199,8 @@ async fn main() -> anyhow::Result<()> {
         let http = args.http;
         let port = http.port();
         tracing::warn!("--dev: GET /api/dev/token mints operator tokens for anyone who can reach port {port}");
-        tracing::info!("operator UI: http://localhost:{port}/?av=robot-01&role=operator");
-        tracing::info!("viewer UI:   http://localhost:{port}/?av=robot-01&role=viewer");
+        tracing::info!("operator UI: http://localhost:{port}/?room=robot-01&role=operator");
+        tracing::info!("viewer UI:   http://localhost:{port}/?room=robot-01&role=viewer");
     }
     let tls = args.http_tls.then(|| web::tls_config(&cert)).transpose()?;
     let web_cfg = web::Config {
@@ -258,8 +269,8 @@ async fn handle(relay: Arc<Relay>, req: tq_transport::wt::Request) -> anyhow::Re
         .unwrap_or_default();
     let peer = req.conn().remote_address();
 
-    let (kind, av_id) = match segments.as_slice() {
-        ["v1", kind @ ("publish" | "session"), av] => (*kind, av.to_string()),
+    let (kind, room_id) = match segments.as_slice() {
+        ["v1", kind @ ("publish" | "session"), room] => (*kind, room.to_string()),
         _ => {
             req.reject(http::StatusCode::NOT_FOUND).await?;
             anyhow::bail!("{peer}: unknown path {}", url.path());
@@ -276,20 +287,20 @@ async fn handle(relay: Arc<Relay>, req: tq_transport::wt::Request) -> anyhow::Re
         "publish" => claims.role == Role::Publisher,
         _ => matches!(claims.role, Role::Operator | Role::Viewer),
     };
-    if !role_ok || !claims.allows_av(&av_id) {
+    if !role_ok || !claims.allows_room(&room_id) {
         req.reject(http::StatusCode::FORBIDDEN).await?;
         anyhow::bail!(
             "{peer}: token for {} {} not valid on {}",
             claims.role,
-            claims.av,
+            claims.room,
             url.path()
         );
     }
 
     let session = req.ok().await?;
-    let av = relay.av(&av_id);
+    let room = relay.room(&room_id);
     match kind {
-        "publish" => publisher::run(relay, av, session, claims).await,
-        _ => client::run(relay, av, session, claims).await,
+        "publish" => publisher::run(relay, room, session, claims).await,
+        _ => client::run(relay, room, session, claims).await,
     }
 }

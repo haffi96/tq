@@ -1,10 +1,10 @@
 //! The relay session: the native counterpart of `web/src/worker.ts`.
 //!
 //! Runs on a tokio runtime next to the UI. It connects (and reconnects) to
-//! the relay, reads the control stream, every camera's GOP streams and the
-//! teleop datagrams, and hands frames to one decoder thread per camera
-//! ([`crate::feed`]). The UI hears about connection and control changes
-//! through [`Event`]s and drives the session with [`Command`]s.
+//! the relay, reads the control stream, the room's events stream, every
+//! camera's GOP streams and the teleop datagrams, and hands frames to one decoder thread per camera
+//! ([`crate::feed`]). The UI hears about connection, control and room
+//! changes through [`Event`]s and drives the session with [`Command`]s.
 
 use std::{
     collections::HashMap,
@@ -15,9 +15,12 @@ use std::{
 use anyhow::Context;
 use futures::channel::mpsc::UnboundedSender;
 use tokio::sync::mpsc;
-use tq_proto::{clock_offset, now_us, BuildInfo, CameraInfo, ClockFilter, Compat, Control, Datagram, Role};
+use tq_proto::{
+    clock_offset, now_us, BuildInfo, CameraInfo, ClockFilter, Compat, Control, Datagram, Role, RoomMessage,
+};
 use tq_transport::{
     control::{ControlRx, ControlTx},
+    events::{EventsRx, Incoming},
     group::GroupReader,
     quic::{self, QuicOptions, ServerTrust},
     Session,
@@ -34,7 +37,7 @@ const TELEOP: Duration = Duration::from_millis(50);
 const RECONNECT: Duration = Duration::from_secs(1);
 /// After a relay with another protocol major: it will not change soon.
 const RECONNECT_REFUSED: Duration = Duration::from_secs(10);
-/// Group streams can overtake the welcome message; they wait this long for
+/// Group streams can overtake the room's state; they wait this long for
 /// the camera list rather than being dropped (which would lose the cached
 /// GOP).
 const CAMERAS_WAIT: Duration = Duration::from_secs(2);
@@ -46,7 +49,7 @@ pub struct Config {
     /// `host:port` of the relay's QUIC endpoint; default: the HTTP host and
     /// the port from `/api/info`.
     pub relay: Option<String>,
-    pub av: String,
+    pub room: String,
     pub role: Role,
     pub token: Option<String>,
     /// Signs a token locally instead of asking the relay for a dev token.
@@ -69,6 +72,8 @@ pub enum ConnState {
 pub enum Event {
     Status(ConnState, Option<String>),
     Control(Control),
+    /// From the room's events stream: its state, or one of its events.
+    Room(RoomMessage),
     /// A camera got a new picture (coalesced: at most one pending).
     Frame,
 }
@@ -213,9 +218,9 @@ async fn run(shared: Arc<Shared>, mut commands: mpsc::UnboundedReceiver<Command>
         shared.event(Event::Status(ConnState::Connecting, None));
         let mut wait = RECONNECT;
         let reason = match connect(&shared).await {
-            Ok((session, relay)) => {
+            Ok(session) => {
                 shared.event(Event::Status(ConnState::Connected, None));
-                let reason = serve(&shared, session, relay.is_some(), &mut commands).await;
+                let reason = serve(&shared, session, &mut commands).await;
                 // Commands queued while disconnected are stale (teleop
                 // especially); drop them.
                 while commands.try_recv().is_ok() {}
@@ -260,8 +265,7 @@ impl std::fmt::Display for VersionRefused {
 
 impl std::error::Error for VersionRefused {}
 
-/// Connects; returns the session and the relay's build (`None` before 1.1).
-async fn connect(shared: &Shared) -> anyhow::Result<(Session, Option<BuildInfo>)> {
+async fn connect(shared: &Shared) -> anyhow::Result<Session> {
     let c = &shared.config;
     let info: Info = http_get_json(&c.http.join("/api/info")?)
         .await
@@ -276,7 +280,7 @@ async fn connect(shared: &Shared) -> anyhow::Result<(Session, Option<BuildInfo>)
             &tq_proto::Claims {
                 sub: format!("app-{}", c.role),
                 role: c.role,
-                av: c.av.clone(),
+                room: c.room.clone(),
                 exp: now_us() / 1_000_000 + 12 * 3600,
             },
         ),
@@ -284,7 +288,7 @@ async fn connect(shared: &Shared) -> anyhow::Result<(Session, Option<BuildInfo>)
             let mut url = c.http.join("/api/dev/token")?;
             url.query_pairs_mut()
                 .append_pair("role", &c.role.to_string())
-                .append_pair("av", &c.av)
+                .append_pair("room", &c.room)
                 .append_pair("sub", &format!("app-{}", c.role));
             let v: serde_json::Value = http_get_json(&url)
                 .await
@@ -311,34 +315,25 @@ async fn connect(shared: &Shared) -> anyhow::Result<(Session, Option<BuildInfo>)
         }
     };
     let mut url = url::Url::parse(&format!("https://{host}"))?;
-    url.set_path(&format!("/v1/session/{}", c.av));
+    url.set_path(&format!("/v1/session/{}", c.room));
     url.query_pairs_mut().append_pair("token", &token);
-    let session = client.connect(url).await.context("WebTransport connect")?;
-    Ok((session, info.build))
+    client.connect(url).await.context("WebTransport connect")
 }
 
-/// Runs one connected session until it closes; returns why. `hello`: the
-/// relay knows the message (it reported a build).
-async fn serve(
-    shared: &Arc<Shared>,
-    session: Session,
-    hello: bool,
-    commands: &mut mpsc::UnboundedReceiver<Command>,
-) -> String {
+/// Runs one connected session until it closes; returns why.
+async fn serve(shared: &Arc<Shared>, session: Session, commands: &mut mpsc::UnboundedReceiver<Command>) -> String {
     let (send, recv) = match session.open_bi().await {
         Ok(s) => s,
         Err(e) => return format!("control stream: {e}"),
     };
     let ctl = ControlTx::new(send);
-    if hello {
-        let build = shared.config.build.clone();
-        if let Err(e) = ctl.send(&Control::Hello { build }).await {
-            return format!("control: {e}");
-        }
+    let build = shared.config.build.clone();
+    if let Err(e) = ctl.send(&Control::Hello { build }).await {
+        return format!("control: {e}");
     }
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(read_control(shared.clone(), ControlRx::new(recv)));
-    tasks.spawn(read_groups(shared.clone(), session.clone()));
+    tasks.spawn(read_streams(shared.clone(), session.clone()));
     tasks.spawn(read_datagrams(shared.clone(), session.clone()));
     if shared.config.role == Role::Operator {
         tasks.spawn(send_teleop(shared.clone(), session.clone()));
@@ -390,46 +385,61 @@ fn command_datagram(seq: u32, command: &str, args: &serde_json::Value) -> bytes:
 async fn read_control(shared: Arc<Shared>, mut rx: ControlRx) -> anyhow::Result<()> {
     let mut filter = ClockFilter::new(20);
     while let Some(msg) = rx.recv().await? {
-        match &msg {
-            Control::Welcome { state, .. } | Control::State { state } => {
-                let mut clock = shared.clock.lock().unwrap();
-                clock.pub_offset_us = state.publisher.as_ref().and_then(|p| p.clock_offset_us);
-                clock.pub_error_us = state.publisher.as_ref().and_then(|p| p.clock_error_us);
-                drop(clock);
-                if let Some(p) = &state.publisher {
-                    shared.set_cameras(&p.cameras);
-                }
+        if let Control::Pong { t0_us, t1_us, .. } = &msg {
+            let (relay_minus_me, rtt) = clock_offset(*t0_us, *t1_us, now_us());
+            filter.add(-relay_minus_me, rtt);
+            let mut clock = shared.clock.lock().unwrap();
+            if let Some((off, err)) = filter.estimate() {
+                clock.my_offset_us = Some(off);
+                clock.my_error_us = Some(err);
             }
-            Control::Pong { t0_us, t1_us, .. } => {
-                let (relay_minus_me, rtt) = clock_offset(*t0_us, *t1_us, now_us());
-                filter.add(-relay_minus_me, rtt);
-                let mut clock = shared.clock.lock().unwrap();
-                if let Some((off, err)) = filter.estimate() {
-                    clock.my_offset_us = Some(off);
-                    clock.my_error_us = Some(err);
-                }
-                clock.relay_rtt_ms = Some(rtt as f64 / 1000.0);
-                continue;
-            }
-            _ => {}
+            clock.relay_rtt_ms = Some(rtt as f64 / 1000.0);
+            continue;
         }
         shared.event(Event::Control(msg));
     }
     anyhow::bail!("relay closed the control stream")
 }
 
-async fn read_groups(shared: Arc<Shared>, session: Session) -> anyhow::Result<()> {
+/// The room's state and events. Its state brings the camera list and the
+/// publisher's clock offset.
+async fn read_events(shared: Arc<Shared>, mut rx: EventsRx) -> anyhow::Result<()> {
+    while let Some(msg) = rx.recv().await? {
+        if let RoomMessage::State { state, .. } = &msg {
+            let mut clock = shared.clock.lock().unwrap();
+            clock.pub_offset_us = state.publisher.as_ref().and_then(|p| p.clock_offset_us);
+            clock.pub_error_us = state.publisher.as_ref().and_then(|p| p.clock_error_us);
+            drop(clock);
+            let cameras: Vec<CameraInfo> = state.tracks.iter().map(|t| t.camera.clone()).collect();
+            shared.set_cameras(&cameras);
+        }
+        shared.event(Event::Room(msg));
+    }
+    Ok(())
+}
+
+/// Unidirectional streams: GOPs and the room's events stream.
+async fn read_streams(shared: Arc<Shared>, session: Session) -> anyhow::Result<()> {
     loop {
         let stream = session.accept_uni().await?;
         let shared = shared.clone();
         tokio::spawn(async move {
-            let _ = read_group(shared, stream).await;
+            match Incoming::open(stream).await {
+                Ok(Incoming::Group(reader)) => {
+                    let _ = read_group(shared, reader).await;
+                }
+                Ok(Incoming::Events(rx)) => {
+                    if let Err(e) = read_events(shared, rx).await {
+                        tracing::debug!(error = format!("{e:#}"), "events stream ended");
+                    }
+                }
+                Err(e) => tracing::debug!(error = format!("{e:#}"), "bad stream"),
+            }
         });
     }
 }
 
-async fn read_group(shared: Arc<Shared>, stream: tq_transport::RecvStream) -> anyhow::Result<()> {
-    let mut reader = GroupReader::open(stream).await?;
+async fn read_group(shared: Arc<Shared>, mut reader: GroupReader) -> anyhow::Result<()> {
     let header = reader.header.clone();
     let mut feed = shared.feed_at(header.camera);
     if feed.is_none() {

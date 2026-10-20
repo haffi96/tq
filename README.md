@@ -68,8 +68,8 @@ IMPAIR=starlink-bad dev/run-local.sh
 ```
 
 Then open:
-- operator: http://localhost:8080/?av=robot-01&role=operator
-- viewer: http://localhost:8080/?av=robot-01&role=viewer
+- operator: http://localhost:8080/?room=robot-01&role=operator
+- viewer: http://localhost:8080/?room=robot-01&role=viewer
 
 Operator controls:
 - **Claim**, then hold `W`/`A`/`S`/`D` to drive (commands at 20 Hz).
@@ -174,7 +174,7 @@ cargo build --release
 ./target/release/tq-probe --role operator --teleop-hz 20 --duration 20   # headless check
 ```
 
-Tokens: `tq-relay token --role operator --av robot-01` prints a token. Pass
+Tokens: `tq-relay token --role operator --room robot-01` prints a token. Pass
 it to the page as `?token=`. Without `--dev`, the relay does not mint tokens
 over HTTP.
 
@@ -201,18 +201,55 @@ The publisher completes an access unit as soon as it knows the AU is over:
 - Encoders that emit one slice per frame and no AUD terminator
   can set `"complete_on_vcl": true` on the camera to get the same effect.
 
-## Protocol (v1)
+## Protocol (v2)
 
-Every hop is a WebTransport session with three kinds of channel.
+Each robot has a **room** on the relay, named by its id
+(`/v1/publish/{room}`, `/v1/session/{room}`, `?room=` on the web page).
+The robot's publisher, its operators and its viewers all join it. Every
+hop is a WebTransport session with four kinds of channel.
 
 **1. Control stream.** This is the first bidirectional stream, opened by the
-client. Each message is `len:u32` followed by JSON with a `type` field.
+client. Each message is `len:u32` followed by JSON with a `type` field. It
+carries what concerns the session itself.
 - Publisher: `announce` and `publisher_status`.
-- Browser: `claim`, `release`, `keyframe_request`.
-- Relay: `welcome`, `state`, `claim_result`, `link_stats`, `operator`.
+- Operator and viewer: `hello` (must come first), `claim`, `release`,
+  `keyframe_request`.
+- Relay: `welcome`, `claim_result`, `link_stats`, `operator`.
 - Both sides use `ping`/`pong` to measure RTT and NTP-style clock offset.
 
-**2. GOP streams.** There is one unidirectional stream per camera per GOP:
+**2. Events stream.** One unidirectional stream per session carries the
+room ([`crates/tq-proto/src/room.rs`](crates/tq-proto/src/room.rs)):
+
+```text
+type=0x02 ver=1, then per message: len:u32 JSON
+```
+
+The relay opens one to each operator and viewer. It starts with a `state`
+(the room as of event `seq`), then sends every event in order, each with
+the next `seq`:
+
+| Event | When |
+| --- | --- |
+| `participant_joined` / `participant_left` | an operator or viewer session joins (after its `hello`) or ends |
+| `publisher_connected` / `publisher_disconnected` | the robot connects, drops (`disconnected`) or is taken over by a new session (`replaced`) |
+| `track_published` / `track_updated` / `track_unpublished` | a camera appears in, changes in or leaves the publisher's announce; tracks of a publisher that does not come back within `--track-grace-secs` (30) are unpublished |
+| `track_online` / `track_offline` | a camera's source starts or stops producing, or the publisher drops |
+| `operator_changed` | the claim is `claimed`, `forced`, `released`, or freed because the holder `left` |
+| `deadman_tripped` / `deadman_cleared` | the robot safe-stops or re-arms |
+
+A new `state` follows whenever the room changes (at most every 100 ms). It
+also carries the live numbers (fps, RTT, clock offset), which are not
+events. A session that falls behind gets a fresh `state` instead of the
+events it missed. Events are encoded once on the relay and fanned out to
+every session.
+
+The publisher opens one to the relay too, and sends the edges only the
+robot sees: `track_online`/`track_offline` and
+`deadman_tripped`/`deadman_cleared`, timestamped where they happened. It
+starts with the current value of each; the relay drops whatever changes
+nothing and numbers the rest into the room's sequence.
+
+**3. GOP streams.** There is one unidirectional stream per camera per GOP:
 
 ```text
 type=0x01 ver=1 camera:u16 group:u64 codec_len:u8 codec
@@ -223,7 +260,10 @@ A group starts with its keyframe, which carries its parameter sets. Newer
 groups get a higher QUIC stream priority. Each hop renumbers groups so they
 stay monotonic across publisher restarts.
 
-**3. Datagrams.** Teleop `command` (0x10), `ack` (0x11), `heartbeat` (0x12)
+The control and events streams are sent at a priority above every GOP
+stream, so they never queue behind video on a full link.
+
+**4. Datagrams.** Teleop `command` (0x10), `ack` (0x11), `heartbeat` (0x12)
 and `echo` (0x13). Each carries a sequence number and the sender's own
 timestamp, so RTT needs no clock sync. The relay forwards them only to and
 from the session that holds the operator claim.

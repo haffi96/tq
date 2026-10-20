@@ -7,7 +7,7 @@
 //! ```json
 //! {
 //!   "relay_http": "https://tq-relay-1.haffi.dev",
-//!   "av": "robot-01",
+//!   "room": "robot-01",
 //!   "role": "operator",
 //!   "secret": "…"
 //! }
@@ -24,7 +24,7 @@ use tq_proto::Role;
 pub struct File {
     pub relay_http: Option<String>,
     pub relay: Option<String>,
-    pub av: Option<String>,
+    pub room: Option<String>,
     pub role: Option<Role>,
     pub token: Option<String>,
     pub secret: Option<String>,

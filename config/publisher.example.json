@@ -1,5 +1,5 @@
 {
-  "av_id": "robot-01",
+  "room_id": "robot-01",
   "relay_url": "https://127.0.0.1:4443",
   "relay_trust": {
     "mode": "hash_url",

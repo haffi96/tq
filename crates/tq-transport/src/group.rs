@@ -169,6 +169,12 @@ impl GroupReader {
     pub async fn open(mut stream: RecvStream) -> anyhow::Result<Self> {
         let mut fixed = [0u8; GROUP_HEADER_FIXED];
         stream.read_exact(&mut fixed).await?;
+        Self::open_fixed(stream, fixed).await
+    }
+
+    /// Continues after the fixed part of the header (see
+    /// [`crate::events::Incoming`]).
+    pub async fn open_fixed(mut stream: RecvStream, fixed: [u8; GROUP_HEADER_FIXED]) -> anyhow::Result<Self> {
         let (mut header, codec_len) = GroupHeader::decode_fixed(&fixed)?;
         let mut codec = vec![0u8; codec_len];
         stream.read_exact(&mut codec).await?;

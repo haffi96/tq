@@ -1,10 +1,10 @@
 //! tq-probe: a headless browser stand-in. Joins the relay as a viewer or
 //! operator, receives every camera's GOP streams and reports per-hop
 //! latency; as an operator it can claim and stream teleop commands to
-//! exercise the dead-man path.
+//! exercise the dead-man path. It logs the room's events as they arrive.
 //!
 //! ```text
-//! tq-probe --relay https://127.0.0.1:4443 --av robot-01 --role operator --teleop-hz 20 --duration 20
+//! tq-probe --relay https://127.0.0.1:4443 --room robot-01 --role operator --teleop-hz 20 --duration 20
 //! ```
 
 use std::{
@@ -15,10 +15,13 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use tq_proto::{clock_offset, now_us, sign_token, Claims, Control, Datagram, Role, FLAG_CAPTURE_FROM_SEI};
+use tq_proto::{
+    clock_offset, now_us, sign_token, Claims, Control, Datagram, Role, RoomEvent, RoomMessage, RoomState,
+    FLAG_CAPTURE_FROM_SEI,
+};
 use tq_transport::{
     control::{ControlRx, ControlTx},
-    group::GroupReader,
+    events::Incoming,
     quic::{self, QuicOptions, ServerTrust},
 };
 
@@ -30,7 +33,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8080/api/cert")]
     cert_url: String,
     #[arg(long, default_value = "robot-01")]
-    av: String,
+    room: String,
     #[arg(long, default_value = "viewer")]
     role: Role,
     #[arg(long, env = "TQ_SHARED_SECRET", hide_env_values = true)]
@@ -44,9 +47,6 @@ struct Args {
     /// Print one summary line as JSON at the end.
     #[arg(long)]
     json: bool,
-    /// Skip the `hello` (behave like a client from before protocol 1.1).
-    #[arg(long)]
-    no_hello: bool,
     /// Claim this protocol (`MAJOR.MINOR`) in the hello, to test the
     /// relay's version checks.
     #[arg(long, hide = true)]
@@ -102,6 +102,16 @@ struct Shared {
     names: Vec<String>,
 }
 
+impl Shared {
+    fn apply(&mut self, state: RoomState) {
+        self.names = state.tracks.iter().map(|t| t.camera.id.clone()).collect();
+        if let Some(p) = state.publisher {
+            self.pub_offset = p.clock_offset_us.unwrap_or(0);
+            self.tripped = Some(p.teleop.deadman_tripped);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -114,30 +124,28 @@ async fn main() -> anyhow::Result<()> {
     let claims = Claims {
         sub: format!("probe-{}", args.role),
         role: args.role,
-        av: args.av.clone(),
+        room: args.room.clone(),
         exp: now_us() / 1_000_000 + 3600,
     };
     let token = sign_token(args.secret.as_bytes(), &claims);
     let hash = fetch_hash(&args.cert_url).await?;
     let client = quic::client(ServerTrust::Hashes(vec![hash]), &QuicOptions::default())?;
     let mut url = url::Url::parse(&args.relay)?;
-    url.set_path(&format!("/v1/session/{}", args.av));
+    url.set_path(&format!("/v1/session/{}", args.room));
     url.query_pairs_mut().append_pair("token", &token);
     let session = client.connect(url).await.context("connect")?;
     let (send, recv) = session.open_bi().await?;
     let ctl = ControlTx::new(send);
     let mut rx = ControlRx::new(recv);
-    if !args.no_hello {
-        let mut build = tq_proto::build_info!("tq-probe");
-        if let Some(p) = &args.fake_protocol {
-            let (major, minor) = p.split_once('.').context("--fake-protocol MAJOR.MINOR")?;
-            build.protocol = tq_proto::ProtocolVersion {
-                major: major.parse()?,
-                minor: minor.parse()?,
-            };
-        }
-        ctl.send(&Control::Hello { build }).await?;
+    let mut build = tq_proto::build_info!("tq-probe");
+    if let Some(p) = &args.fake_protocol {
+        let (major, minor) = p.split_once('.').context("--fake-protocol MAJOR.MINOR")?;
+        build.protocol = tq_proto::ProtocolVersion {
+            major: major.parse()?,
+            minor: minor.parse()?,
+        };
     }
+    ctl.send(&Control::Hello { build }).await?;
     let shared = Arc::new(Mutex::new(Shared {
         cameras: HashMap::new(),
         my_offset: 0,
@@ -172,32 +180,11 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             while let Ok(Some(msg)) = rx.recv().await {
                 match msg {
-                    Control::Welcome {
-                        session,
-                        role,
-                        state,
-                        relay,
-                    } => {
+                    Control::Welcome { session, role, relay } => {
                         let relay = relay.map_or_else(|| "unknown (protocol 1.0)".to_string(), |b| b.long());
-                        let publisher = state.publisher.as_ref().map(|p| {
-                            p.build
-                                .as_ref()
-                                .map_or_else(|| "unknown (protocol 1.0)".to_string(), |b| b.long())
-                        });
-                        tracing::info!(%session, %role, %relay, ?publisher, "welcome");
+                        tracing::info!(%session, %role, %relay, "welcome");
                         if operator {
                             let _ = ctl.send(&Control::Claim { force: true }).await;
-                        }
-                        if let Some(p) = state.publisher {
-                            shared.lock().unwrap().names = p.cameras.iter().map(|c| c.id.clone()).collect();
-                        }
-                    }
-                    Control::State { state } => {
-                        let mut s = shared.lock().unwrap();
-                        if let Some(p) = state.publisher {
-                            s.pub_offset = p.clock_offset_us.unwrap_or(0);
-                            s.names = p.cameras.iter().map(|c| c.id.clone()).collect();
-                            s.tripped = Some(p.teleop.deadman_tripped);
                         }
                     }
                     Control::Pong { t0_us, t1_us, .. } => {
@@ -270,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    // Video.
+    // Video and the room's events.
     {
         let shared = shared.clone();
         let session = session.clone();
@@ -278,8 +265,21 @@ async fn main() -> anyhow::Result<()> {
             while let Ok(stream) = session.accept_uni().await {
                 let shared = shared.clone();
                 tokio::spawn(async move {
-                    let Ok(mut reader) = GroupReader::open(stream).await else {
-                        return;
+                    let mut reader = match Incoming::open(stream).await {
+                        Ok(Incoming::Group(r)) => r,
+                        Ok(Incoming::Events(mut rx)) => {
+                            while let Ok(Some(msg)) = rx.recv().await {
+                                match msg {
+                                    RoomMessage::State { state, .. } => shared.lock().unwrap().apply(state),
+                                    RoomMessage::Event(RoomEvent { seq, event, .. }) => {
+                                        tracing::info!(seq, ?event, "event")
+                                    }
+                                    RoomMessage::Unknown => {}
+                                }
+                            }
+                            return;
+                        }
+                        Err(_) => return,
                     };
                     let cam = reader.header.camera;
                     {

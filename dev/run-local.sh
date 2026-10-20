@@ -44,7 +44,7 @@ fi
 pids+=($!)
 
 echo
-echo "operator: http://localhost:8080/?av=robot-01&role=operator"
-echo "viewer:   http://localhost:8080/?av=robot-01&role=viewer"
+echo "operator: http://localhost:8080/?room=robot-01&role=operator"
+echo "viewer:   http://localhost:8080/?room=robot-01&role=viewer"
 echo
 wait

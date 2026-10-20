@@ -7,9 +7,13 @@ use std::{
 
 use anyhow::Context;
 use tokio::{sync::broadcast::error::RecvError, task::JoinSet};
-use tq_proto::{now_us, sign_token, BuildInfo, CameraInfo, CameraStatus, Claims, Compat, Control, Datagram, Role};
+use tq_proto::{
+    now_us, sign_token, BuildInfo, CameraInfo, CameraStatus, Claims, Compat, Control, Datagram, Event, Role, RoomEvent,
+    RoomMessage,
+};
 use tq_transport::{
     control::{ControlRx, ControlTx},
+    events::EventsTx,
     group::{GroupSender, Outcome, SendPolicy},
     quic::{self, ServerTrust},
     Session,
@@ -17,6 +21,7 @@ use tq_transport::{
 
 use crate::{
     config::{Config, Trust},
+    edges::Edges,
     source::Camera,
     teleop::Teleop,
 };
@@ -26,6 +31,7 @@ pub struct Uplink {
     pub cfg: Config,
     pub cameras: Vec<Arc<Camera>>,
     pub teleop: Arc<Teleop>,
+    pub edges: Arc<Edges>,
 }
 
 impl Uplink {
@@ -54,7 +60,7 @@ impl Uplink {
         let claims = Claims {
             sub: self.cfg.publisher_id.clone(),
             role: Role::Publisher,
-            av: self.cfg.av_id.clone(),
+            room: self.cfg.room_id.clone(),
             exp: now_us() / 1_000_000 + 24 * 3600,
         };
         sign_token(self.cfg.shared_secret.as_bytes(), &claims)
@@ -72,7 +78,7 @@ impl Uplink {
     async fn session(&self) -> anyhow::Result<()> {
         let client = quic::client(self.trust().await?, &self.cfg.quic)?;
         let mut url = url::Url::parse(&self.cfg.relay_url)?;
-        url.set_path(&format!("/v1/publish/{}", self.cfg.av_id));
+        url.set_path(&format!("/v1/publish/{}", self.cfg.room_id));
         url.query_pairs_mut().append_pair("token", &self.token());
         tracing::info!(relay = %self.cfg.relay_url, "connecting");
         let session = tokio::time::timeout(Duration::from_secs(5), client.connect(url))
@@ -102,7 +108,7 @@ impl Uplink {
             })
             .collect();
         ctl.send(&Control::Announce {
-            av_id: self.cfg.av_id.clone(),
+            room_id: self.cfg.room_id.clone(),
             publisher_id: self.cfg.publisher_id.clone(),
             cameras,
             build: Some(self.build.clone()),
@@ -134,6 +140,12 @@ impl Uplink {
         for cam in &self.cameras {
             tasks.spawn(send_camera(session.clone(), cam.clone(), self.cfg.max_lag_ms));
         }
+        tasks.spawn(events_loop(
+            session.clone(),
+            self.cameras.clone(),
+            self.teleop.clone(),
+            self.edges.clone(),
+        ));
         tasks.spawn(control_loop(rx, ctl.clone(), self.teleop.clone()));
         tasks.spawn(datagram_loop(session.clone(), self.teleop.clone()));
         tasks.spawn(status_loop(
@@ -179,6 +191,63 @@ async fn send_camera(session: Session, cam: Arc<Camera>, max_lag_ms: u64) -> any
             Outcome::Skipped | Outcome::Late => {
                 cam.stats.dropped.fetch_add(1, Relaxed);
             }
+        }
+    }
+}
+
+/// Sends the robot's edges to the relay on the events stream: first the
+/// current value of each (the relay drops those that change nothing), then
+/// every edge as it happens, and everything again after falling behind.
+async fn events_loop(
+    session: Session,
+    cameras: Vec<Arc<Camera>>,
+    teleop: Arc<Teleop>,
+    edges: Arc<Edges>,
+) -> anyhow::Result<()> {
+    // Subscribed before reading the current values, so nothing falls in
+    // between.
+    let mut rx = edges.subscribe();
+    let mut tx = EventsTx::open(&session).await?;
+    let mut seq = 0u64;
+    let mut send = async |tx: &mut EventsTx, event: Event, ts_us: u64| {
+        seq += 1;
+        tx.send(&RoomMessage::Event(RoomEvent { seq, ts_us, event })).await
+    };
+    let current = || {
+        let mut events: Vec<Event> = cameras
+            .iter()
+            .map(|c| {
+                let camera = c.config.id.clone();
+                if c.stats.online.load(Relaxed) {
+                    Event::TrackOnline { camera }
+                } else {
+                    Event::TrackOffline {
+                        camera,
+                        reason: "source not connected".into(),
+                    }
+                }
+            })
+            .collect();
+        let t = teleop.status();
+        events.push(if t.deadman_tripped {
+            Event::DeadmanTripped { reason: t.reason }
+        } else {
+            Event::DeadmanCleared
+        });
+        events
+    };
+    for e in current() {
+        send(&mut tx, e, now_us()).await?;
+    }
+    loop {
+        match rx.recv().await {
+            Ok((e, ts_us)) => send(&mut tx, e, ts_us).await?,
+            Err(RecvError::Lagged(_)) => {
+                for e in current() {
+                    send(&mut tx, e, now_us()).await?;
+                }
+            }
+            Err(RecvError::Closed) => return Ok(()),
         }
     }
 }

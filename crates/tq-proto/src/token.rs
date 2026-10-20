@@ -13,15 +13,15 @@ pub struct Claims {
     /// Who this is (shown in the UI and logs).
     pub sub: String,
     pub role: Role,
-    /// Robot (av id) the token is valid for, or `*`.
-    pub av: String,
+    /// Room the token is valid for, or `*`.
+    pub room: String,
     /// Expiry, Unix seconds.
     pub exp: u64,
 }
 
 impl Claims {
-    pub fn allows_av(&self, av_id: &str) -> bool {
-        self.av == "*" || self.av == av_id
+    pub fn allows_room(&self, room_id: &str) -> bool {
+        self.room == "*" || self.room == room_id
     }
 }
 
@@ -85,7 +85,7 @@ mod tests {
         let c = Claims {
             sub: "op-1".into(),
             role: Role::Operator,
-            av: "robot-01".into(),
+            room: "robot-01".into(),
             exp: 2000,
         };
         let t = sign_token(b"secret", &c);
@@ -93,6 +93,6 @@ mod tests {
         assert_eq!(verify_token(b"other", &t, 1000).unwrap_err(), TokenError::Signature);
         assert_eq!(verify_token(b"secret", &t, 2000).unwrap_err(), TokenError::Expired);
         assert_eq!(verify_token(b"secret", "a.b", 0).unwrap_err(), TokenError::Malformed);
-        assert!(c.allows_av("robot-01") && !c.allows_av("robot-02"));
+        assert!(c.allows_room("robot-01") && !c.allows_room("robot-02"));
     }
 }

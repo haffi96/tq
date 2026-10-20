@@ -14,7 +14,10 @@ pub struct ControlTx {
 }
 
 impl ControlTx {
+    /// Takes the send half of the control stream and puts it ahead of
+    /// video ([`crate::events::PRIORITY_URGENT`]).
     pub fn new(stream: SendStream) -> Self {
+        let _ = stream.set_priority(crate::events::PRIORITY_URGENT);
         Self {
             inner: Arc::new(Mutex::new(stream)),
         }

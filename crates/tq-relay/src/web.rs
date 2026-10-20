@@ -17,7 +17,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::{ServeDir, ServeFile},
 };
-use tq_proto::{now_us, sign_token, Claims, Role};
+use tq_proto::{now_us, sign_token, verify_token, Claims, Role, RoomState, TokenError};
 use tq_transport::cert::Certificate;
 
 use crate::Relay;
@@ -45,7 +45,7 @@ pub async fn serve(relay: Arc<Relay>, cfg: Config) -> anyhow::Result<()> {
     let mut app = Router::new()
         .route("/api/cert", get(cert))
         .route("/api/info", get(info))
-        .route("/api/avs", get(avs))
+        .route("/api/rooms", get(rooms))
         .route("/api/dev/token", get(dev_token))
         .with_state(relay);
     if !cfg.cors_origins.is_empty() {
@@ -97,15 +97,38 @@ async fn info(State(relay): State<Arc<Relay>>) -> impl IntoResponse {
     }))
 }
 
-async fn avs(State(relay): State<Arc<Relay>>) -> impl IntoResponse {
-    let avs: Vec<_> = relay.avs.lock().unwrap().values().cloned().collect();
-    Json(avs.iter().map(|a| a.state()).collect::<Vec<_>>())
+#[derive(Deserialize)]
+struct RoomsQuery {
+    #[serde(default)]
+    token: String,
+}
+
+/// The rooms a token is valid for (all of them for `*`), with their
+/// participants. Needs `?token=`, like the WebTransport sessions.
+async fn rooms(State(relay): State<Arc<Relay>>, Query(q): Query<RoomsQuery>) -> axum::response::Response {
+    match rooms_for(&relay, &q.token) {
+        Ok(rooms) => Json(rooms).into_response(),
+        Err(e) => (StatusCode::UNAUTHORIZED, format!("?token=: {e}")).into_response(),
+    }
+}
+
+pub(crate) fn rooms_for(relay: &Relay, token: &str) -> Result<Vec<RoomState>, TokenError> {
+    let claims = verify_token(relay.secret.as_bytes(), token, now_us() / 1_000_000)?;
+    let rooms: Vec<_> = relay
+        .rooms
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|r| claims.allows_room(&r.id))
+        .cloned()
+        .collect();
+    Ok(rooms.iter().map(|r| r.state()).collect())
 }
 
 #[derive(Deserialize)]
 struct TokenQuery {
     role: Role,
-    av: String,
+    room: String,
     #[serde(default)]
     sub: Option<String>,
 }
@@ -122,7 +145,7 @@ async fn dev_token(State(relay): State<Arc<Relay>>, Query(q): Query<TokenQuery>)
     let claims = Claims {
         sub: q.sub.unwrap_or_else(|| format!("dev-{}", q.role)),
         role: q.role,
-        av: q.av,
+        room: q.room,
         exp: now_us() / 1_000_000 + 12 * 3600,
     };
     Json(serde_json::json!({ "token": sign_token(relay.secret.as_bytes(), &claims) })).into_response()

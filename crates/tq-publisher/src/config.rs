@@ -8,7 +8,8 @@ use tq_transport::quic::QuicOptions;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub av_id: String,
+    /// The room this robot publishes into.
+    pub room_id: String,
     #[serde(default)]
     pub publisher_id: String,
     /// `https://host:port` of the relay's WebTransport endpoint.
@@ -139,7 +140,7 @@ impl Config {
             cfg.token = t;
         }
         if cfg.publisher_id.is_empty() {
-            cfg.publisher_id = format!("{}-publisher", cfg.av_id);
+            cfg.publisher_id = format!("{}-publisher", cfg.room_id);
         }
         for c in &mut cfg.cameras {
             if c.label.is_empty() {
@@ -152,13 +153,13 @@ impl Config {
 
     fn validate(&self) -> anyhow::Result<()> {
         let mut problems = Vec::new();
-        if self.av_id.is_empty()
+        if self.room_id.is_empty()
             || !self
-                .av_id
+                .room_id
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            problems.push("av_id must be non-empty [A-Za-z0-9_-]".to_string());
+            problems.push("room_id must be non-empty [A-Za-z0-9_-]".to_string());
         }
         if url::Url::parse(&self.relay_url)
             .map(|u| u.scheme() != "https")

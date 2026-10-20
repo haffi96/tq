@@ -110,23 +110,12 @@ pub struct QuicStats {
     pub congestion_events: u64,
 }
 
-/// What a browser session sees of the relay.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RelayState {
-    pub av_id: String,
-    pub publisher: Option<PublisherStatus>,
-    /// Session id holding the operator claim.
-    pub operator: Option<String>,
-    pub viewers: usize,
-    pub operators: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Control {
     // publisher -> relay
     Announce {
-        av_id: String,
+        room_id: String,
         publisher_id: String,
         cameras: Vec<CameraInfo>,
         /// `None` from publishers before protocol 1.1.
@@ -149,16 +138,13 @@ pub enum Control {
         session: Option<String>,
     },
 
-    // relay -> browser
+    // relay -> client. The room itself (state and events) arrives on the
+    // events stream; see [`crate::room`].
     Welcome {
         session: String,
         role: Role,
-        state: RelayState,
         #[serde(default)]
         relay: Option<BuildInfo>,
-    },
-    State {
-        state: RelayState,
     },
     ClaimResult {
         ok: bool,
@@ -170,10 +156,9 @@ pub enum Control {
         quic: QuicStats,
     },
 
-    // browser -> relay
-    /// The client's build, first on the control stream. Only sent to relays
-    /// that report a build in `/api/info` (1.1 and later); older ones would
-    /// drop the session on a message they do not know.
+    // client -> relay
+    /// The client's build. Must be the first message on the control
+    /// stream; the relay joins the client to the room only after it.
     Hello {
         build: BuildInfo,
     },
@@ -317,7 +302,7 @@ mod tests {
             Control::Claim { force: true }
         );
         // A 1.0 announce, without build info.
-        let m = Control::decode(br#"{"type":"announce","av_id":"a","publisher_id":"p","cameras":[]}"#).unwrap();
+        let m = Control::decode(br#"{"type":"announce","room_id":"a","publisher_id":"p","cameras":[]}"#).unwrap();
         assert!(matches!(m, Control::Announce { build: None, .. }));
     }
 
