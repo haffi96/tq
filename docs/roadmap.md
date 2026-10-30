@@ -1,0 +1,164 @@
+# Roadmap: from teleop to a general low-latency stack
+
+tq becomes **tele over QUIC**: low-latency video, telemetry and control
+between machines and people, over QUIC/WebTransport, with latency measured
+end to end on every frame. Robotics is the focus. Teleoperation becomes the
+first fully supported example, built from the same parts anyone else uses.
+
+Nobody depends on the current releases, so nothing here keeps backwards
+compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
+
+## Decisions
+
+| Question | Decision |
+| --- | --- |
+| Name | Keep `tq`, now standing for *tele over QUIC*. |
+| Protocol | Our own wire format, using MoQ terms (room, track, group, frame). It is "MoQ-style", not IETF MoQT. A MoQT/moq-lite mapping can come later. |
+| Core | Rust, and nothing teleop-specific in it. `grep -ri teleop crates/tq-relay crates/tq-wire crates/tq-transport` returns nothing. |
+| Latency | Per-hop timestamps on every frame (video and data). SEI capture times stay. Per-hop clock offsets (NTP-style) let any participant put every timestamp on its own clock. |
+| UI | One layout spec (JSON) that both apps render. Web leads the spec and editor. Native (GPUI) is the high-performance console, and gets real investment. |
+| SDKs | Rust first and uncompromised. TS and Python are possible, with small examples, but not a priority. |
+| Sources | A `Source` trait and a registry, so adding a source is one module. TCP Annex B stays and doubles as an out-of-process plugin boundary. |
+
+## Concept mapping
+
+| Today | 3.0 |
+| --- | --- |
+| publisher / operator / viewer | **sessions**: any session may publish, subscribe or both, as its token allows |
+| a publisher's cameras | a **broadcast**: a named bundle of tracks, channels and locks that a session advertises |
+| camera (`camera: u16`) | **track** with a kind (`video` or `data`) and a priority |
+| `Role` in the token | **permissions** with path patterns (`sub:rover-7/telemetry`, `write:rover-7/drive`, `pub:alice`). Operator, viewer and robot remain only as presets for dev tokens |
+| every client gets every camera | explicit **subscribe**; owners can see which tracks have subscribers |
+| teleop datagrams | **channels**: named message lanes into a broadcast, with seq, timestamps, ack and echo built in |
+| operator claim | **locks**: a named exclusive lock over some of a broadcast's channels |
+| dead-man | **watchdog** on a lock, run by the owner's SDK |
+| `TeleopStatus`, dead-man events | `.status` and `.events` **data tracks** |
+
+## Phases
+
+Every phase ends with teleop working end to end (`dev/run-local.sh`, both
+apps, tq-probe). Teleop is the regression test.
+
+### Phase 1: generic core (protocol 3.0)
+
+- `tq-proto` → `tq-wire`, implementing [protocol-3.md](protocol-3.md):
+  one endpoint for all sessions, broadcasts, tracks with kinds and
+  priorities, explicit subscriptions, channels, locks and path permissions.
+- Relay: rewrites indices between owner and room, routes channel datagrams
+  by sender session, enforces locks and permissions, knows nothing about
+  teleop. Many broadcasts per room if that comes cheap, otherwise a cap of
+  one to lift in a minor (no wire change).
+- Robot side: generic channel handling; teleop moves into a `tq-teleop`
+  crate (drive command schema, sink trait, watchdog).
+- Data tracks: any session can publish JSON telemetry, with the same
+  latency trace as video. Device state and events become `.status` and
+  `.events` tracks.
+- Clocks: one `Clock` type in the SDK composes the per-hop offsets and keeps
+  error bounds. Every app shows glass-to-glass latency on the receiver's
+  clock, SEI or not.
+- Web, tq-app and tq-probe move to 3.0.
+- Accept: the grep above is empty, teleop works, all tests pass.
+
+### Phase 2: SDK extraction
+
+- A `tq` crate with one `Session` type: advertise broadcasts, subscribe to
+  tracks, open channels, read clocks and latency. `tq-app/session.rs`,
+  `tq-publisher/uplink.rs` and `tq-probe` repeat each other today; they
+  become users of `tq`.
+- `tq-publisher` → `tq-edge`: a config-driven agent on the device (sources to
+  tracks, channels to sinks).
+- Goal: publishing a camera and a channel is about 10 lines of Rust.
+- TS client package taken out of `web/src/worker.ts` and `protocol.ts`.
+- Golden test vectors (encoded bytes and decoded values) in the repo, checked
+  by Rust and TS alike, so the two codecs cannot drift apart.
+- Python: one small example through pyo3, nothing more yet.
+
+On FFI: it helps with native languages (Python via pyo3, C/C++ via a C ABI
+made with cbindgen, Go and Swift through the C ABI). In those, the Rust SDK
+does the work and a binding is thin. It does not help in the browser: the
+browser must use its own WebTransport and WebCodecs, so the TS client stays
+a separate, small implementation of the wire format. The test vectors keep
+it honest. WASM could share the codec, but the codec is the easy part.
+
+### Phase 3: widgets
+
+A **layout** is a JSON document: a grid of widgets, each bound to data by
+path. Both apps render it.
+
+```json
+{
+  "version": 1,
+  "grid": { "cols": 12, "row_height": 40 },
+  "widgets": [
+    { "id": "w1", "type": "video", "at": [0, 0, 8, 9], "bind": { "track": "front" } },
+    { "id": "w2", "type": "plot", "at": [8, 0, 4, 4], "bind": { "track": "telemetry", "path": "battery.voltage" } },
+    { "id": "w3", "type": "drive", "at": [8, 4, 4, 5], "bind": { "channel": "drive", "lock": "drive" }, "props": { "rate_hz": 20 } }
+  ]
+}
+```
+
+- **Data catalog.** The app lists everything in the room: tracks (and, for
+  data tracks, the fields seen so far), channels, locks, device state and
+  events. Binding a widget means choosing from the catalog.
+- **Editing.** Add, remove, drag and resize widgets; bind them from the
+  catalog; save the layout (locally first, later per room on the relay).
+  Some things are locked: a layout can pin widgets, and permissions decide
+  which channels and locks a user can bind.
+- **Performance first.** Each widget type declares its cost (its decode
+  work, redraws per second, and whether it sits on the path from frame
+  arrival to screen). Video and latency-critical widgets have a protected
+  path: no other widget can delay a frame being drawn. Widgets that could
+  slow it (dense plots on fast data, many video tiles at full rate) can
+  still be added, with a visible warning that says what they cost. The app
+  measures its own time to present and shows it, as tq-app's status bar
+  does today.
+- **Ingest rate is not render rate.** Data is consumed at its arrival rate
+  (kHz is fine) and drawn at the display's rate: numbers show the newest
+  value, plots append to a ring buffer and redraw once per display frame.
+  A widget that needs fewer samples than the track carries subscribes with
+  `max_rate_hz`, so the relay thins the data before it is sent.
+- **Catalog v1:** video (with latency HUD), latency per hop, number, plot,
+  button, toggle, slider, keyboard/gamepad drive, lock control, event log,
+  status, map.
+- **Teleop preset:** video grid, drive, lock control, e-stop, latency.
+- **Order:** web first to settle the spec and the editor. Then tq-app renders
+  the same spec with GPUI, keeping the rules that keep video fast (cached
+  views, video surfaces redrawn on their own). After that, the editor comes
+  to native too.
+
+### Phase 4: sources
+
+- A `Source` trait in `tq-edge`: open, then produce access units (video) or
+  messages (data) into a track. A registry maps `"type"` in the config to an
+  implementation:
+  ```json
+  { "id": "front", "kind": "video", "source": { "type": "tcp", "addr": "127.0.0.1:5010" } }
+  ```
+- Built in: `tcp` (today's), `rtsp` (IP cameras), and `stdin` or `unix`
+  sockets.
+- Plugins: any process that writes Annex B (or length-prefixed JSON for
+  data) to a socket is a source with no Rust involved. Rust sources live
+  behind cargo features.
+- Later: a GStreamer sink element and a ROS 2 bridge (images to video
+  tracks, topics to data tracks, channels to topics).
+
+### Phase 5: positioning
+
+- README and docs describe tq as tele over QUIC, with teleop as the first
+  example. This waits until Phase 1 lands, so the README never describes
+  something that does not exist yet.
+- `examples/`: teleop, multi-camera monitoring, PTZ inspection, a fleet
+  dashboard.
+- Repo and package names follow if anything changes.
+
+## Out of scope for now, planned next
+
+- Transcoding and adaptive bitrate (frames pass through untouched).
+- Audio.
+- Direct paths: a relay on the robot or LAN for local users, relays
+  chained to the cloud one, then peer-to-peer QUIC.
+- Reliable channel mode (3.1).
+- Room state filtered per session; rate and bandwidth limits per
+  permission; EdDSA tokens.
+- Auth beyond signed tokens (OIDC, per-user permission management).
+- A MoQT / moq-lite mapping on the relay.
