@@ -39,7 +39,8 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 Updated 2026-10-31. Branch `generalize-core`, open as PR #9 against
 `main`.
 Phase 1 is done; Phase 2's Rust half is done, tq-edge and the "about 10
-lines" SDK goal included (see below). Start with [protocol-3.md](protocol-3.md) for the wire
+lines" SDK goal included. Phase 3 has started: the web console runs on
+layouts ([layout-1.md](layout-1.md)) with a widget editor (see below). Start with [protocol-3.md](protocol-3.md) for the wire
 format, `crates/tq/src/lib.rs` for the SDK, `crates/tq-relay/src/tests.rs`
 for worked examples of every feature, and [install.md](install.md#the-config)
 for tq-edge's config.
@@ -58,6 +59,14 @@ for tq-edge's config.
   SDK's `VideoWriter`), channels feeding sinks (`src/sink.rs`: `log`,
   `tcp`), optional teleop with its own sink.
 - Consoles: `web/` and `crates/tq-app` (GPUI), both on protocol 3.0.
+  The web console is a board of widgets: `web/src/layout.ts` (spec,
+  presets, placement), `catalog.ts` (what can be bound, fields seen,
+  permissions), `widgets.ts` (the types), `board.ts` (rendering,
+  subscriptions, the editor). tq-app still has its fixed teleop view.
+- `dev/fake-device.ts`: stand-in device programs for
+  `config/edge.full.example.json` (telemetry that follows the drive
+  commands, the lights sink, the teleop sink); `dev/run-local.sh` starts
+  it with that config.
 
 **Verified (all on the current branch head):**
 - `cargo test` and `cargo clippy --all-targets`: clean, including the
@@ -74,6 +83,15 @@ for tq-edge's config.
   program is gone); `examples/camera.rs` fed by ffmpeg alongside tq-edge
   (about 30 fps, its channel message acked) with the regression check
   still passing.
+
+- Phase 3 web, live against `CONFIG=config/edge.full.example.json
+  dev/run-local.sh` in headless Chrome (Playwright): the operator and
+  viewer presets; claim, WASD driving (acked, the device's speed follows),
+  Space STOP (acked, lock let go, robot latched); adding a plot, a number
+  and a toggle in the editor and binding them from the catalog (the toggle
+  switched the device's lights and shows their state from telemetry);
+  dragging with push-down and float-up; a 420 px wide window; tq-probe's
+  regression check alongside.
 
 **Regression check** (needs `../streaming-tools` next to this repo, or
 `STREAMING_TOOLS=…`): run `dev/run-local.sh` (or
@@ -100,8 +118,11 @@ replace. Keep all of this when touching the stop, the drive lock or
 console key handling.
 
 **Known gaps and notes:**
-- Consoles drive only the first broadcast with a `drive` lock, and show
-  only video tracks plus `.status` and `.events` (Phase 3 fixes this).
+- tq-app still drives only the first broadcast with a `drive` lock and
+  shows only video, `.status` and `.events`; it does not read layouts yet.
+- Web: Space is STOP even in the editor's text fields (paste text with
+  spaces). Gamepad drive is in but untested with a real pad. No `map`
+  widget yet. Layouts live in `localStorage` only.
 - A killed relay does not close connections, so clients notice only at
   the QUIC idle timeout.
 - tq-app at narrow widths: the status bar text overlaps and lock badges
@@ -113,7 +134,10 @@ console key handling.
   stray connections. Drive tq-app's GUI with osascript System Events
   keystrokes (CGEvent key events do not reach it; CGEvent clicks do).
 
-**Next:** Phase 3 (widgets, layout spec, web first). The TS client
+**Next:** finish Phase 3 on the web (a `map` widget; layouts per room on
+the relay; a gamepad check), then tq-app renders layout 1 with GPUI
+(video surfaces redrawn on their own, cached widget views), then its
+editor. The TS client
 package, golden test vectors and a pyo3 example are lower priority and
 can come whenever.
 
@@ -243,6 +267,13 @@ path. Both apps render it.
   button, toggle, slider, keyboard/gamepad drive, lock control, event log,
   status, map.
 - **Teleop preset:** video grid, drive, lock control, remote stop, latency.
+- **Done on the web:** the spec ([layout-1.md](layout-1.md)), the catalog
+  (tracks with fields seen, channels, locks, filtered by permissions), the
+  editor (add, remove, drag, resize, bind, props, pin, import/export,
+  saved per room in the browser), presets made from the room, subscriptions
+  that follow visible widgets with merged `max_rate_hz`, batched ingest
+  drawn once per frame, cost warnings and the page's own draw time, and
+  every catalog v1 widget except `map`.
 - **Order:** web first to settle the spec and the editor. Then tq-app renders
   the same spec with GPUI, keeping the rules that keep video fast (cached
   views, video surfaces redrawn on their own). After that, the editor comes

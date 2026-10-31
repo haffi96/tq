@@ -1,9 +1,12 @@
 // Media worker: owns the WebTransport session, reads the room's events
-// stream, subscribes to every broadcast's video tracks (and its `.status`
-// and `.events` data tracks), decodes video with WebCodecs and draws each
-// frame on its OffscreenCanvas the moment it is decoded. No jitter buffer:
-// a frame is shown as soon as it is complete. Channel messages and lock
-// heartbeats also go out from here so they never wait behind the UI thread.
+// stream, subscribes to the tracks the page's widgets want (and every
+// broadcast's `.status` and `.events` data tracks), decodes video with
+// WebCodecs and draws each frame on its widgets' OffscreenCanvases the
+// moment it is decoded. No jitter buffer: a frame is shown as soon as it is
+// complete, and nothing the page does can hold it up. Channel messages and
+// lock heartbeats also go out from here so they never wait behind the UI
+// thread. Data and acks go to the page in batches, at most once per
+// display frame: ingest runs at the data's rate, the page draws at its own.
 
 import { SpsPatcher } from './h264sps';
 import {
@@ -15,6 +18,7 @@ import {
   type Path,
   type RoomMessage,
   type RoomState,
+  type Subscription,
   type TrackInfo,
   EVENTS_VERSION,
   FLAG_CAPTURE_FROM_SEI,
@@ -42,7 +46,12 @@ import { WEB_BUILD } from './version';
 
 export type ToWorker =
   | { type: 'connect'; url: string; certHash: string | null; sensorMs: number }
-  | { type: 'canvas'; track: Path; canvas: OffscreenCanvas }
+  /** A video widget's canvas: frames of `track` are drawn on it. */
+  | { type: 'canvas'; id: string; track: Path; canvas: OffscreenCanvas }
+  /** The widget is gone: stop drawing on its canvas. */
+  | { type: 'uncanvas'; id: string }
+  /** Everything the widgets are bound to; replaces the previous list. */
+  | { type: 'want'; subs: Subscription[] }
   | { type: 'control'; msg: Control }
   /** One JSON message on a channel (`<broadcast>/<channel>`). */
   | { type: 'message'; channel: Path; body: unknown }
@@ -88,9 +97,9 @@ export type FromWorker =
   | { type: 'room'; msg: RoomMessage }
   /** How a remote stop went: acked by the robot, or not within STOP_GIVE_UP_MS. */
   | { type: 'stop'; channel: Path; acked: boolean; status?: string; detail?: string }
-  /** One message of a subscribed JSON data track, and its capture time
-   *  on this machine's clock (Unix µs; arrival time when unknown). */
-  | { type: 'data'; track: Path; value: unknown; atUs: number }
+  /** Messages of subscribed JSON data tracks, and acks of channel
+   *  messages, since the last batch. */
+  | { type: 'batch'; data: DataItem[]; acks: AckItem[] }
   | {
       type: 'stats';
       cameras: Record<Path, CameraStats>;
@@ -111,6 +120,22 @@ export type FromWorker =
       };
     };
 
+/** A data track message and its capture time on this machine's clock
+ *  (Unix µs; arrival time when unknown). */
+export interface DataItem {
+  track: Path;
+  value: unknown;
+  atUs: number;
+}
+
+export interface AckItem {
+  channel: Path;
+  seq: number;
+  status: string;
+  detail: string;
+  rttMs: number;
+}
+
 const scope = self as unknown as {
   postMessage(msg: FromWorker): void;
   onmessage: ((e: MessageEvent<ToWorker>) => void) | null;
@@ -125,6 +150,8 @@ const HEARTBEAT_MS = 100;
 const STATE_WAIT_MS = 2000;
 /** Data tracks every console subscribes to (crates/tq-teleop). */
 const WATCHED_DATA = ['.status', '.events'];
+/** Batches go out at most this often. */
+const BATCH_MS = 8;
 
 class Win {
   private sum = 0;
@@ -163,8 +190,9 @@ interface Track {
 }
 
 class Camera implements Track {
-  canvas: OffscreenCanvas | null = null;
-  ctx: OffscreenCanvasRenderingContext2D | null = null;
+  /** Widget id -> its canvas. */
+  canvases = new Map<string, { canvas: OffscreenCanvas; ctx: OffscreenCanvasRenderingContext2D | null }>();
+  size = '-';
   decoder: VideoDecoder | null = null;
   codec: string | null = null;
   group = -1n;
@@ -192,9 +220,9 @@ class Camera implements Track {
     readonly broadcast: string,
   ) {}
 
-  setCanvas(canvas: OffscreenCanvas) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true }) as OffscreenCanvasRenderingContext2D | null;
+  addCanvas(id: string, canvas: OffscreenCanvas) {
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true }) as OffscreenCanvasRenderingContext2D | null;
+    this.canvases.set(id, { canvas, ctx });
   }
 
   // A new group (GOP) stream arrived. Older groups are cancelled: the new
@@ -305,14 +333,15 @@ class Camera implements Track {
   draw(frame: VideoFrame) {
     const info = this.pending.get(frame.timestamp);
     this.pending.delete(frame.timestamp);
-    const canvas = this.canvas;
-    if (canvas && this.ctx) {
+    for (const { canvas, ctx } of this.canvases.values()) {
+      if (!ctx) continue;
       if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
         canvas.width = frame.displayWidth;
         canvas.height = frame.displayHeight;
       }
-      this.ctx.drawImage(frame, 0, 0);
+      ctx.drawImage(frame, 0, 0);
     }
+    this.size = `${frame.displayWidth}x${frame.displayHeight}`;
     frame.close();
     this.c.decoded += 1;
     if (!info) return;
@@ -347,7 +376,7 @@ class Camera implements Track {
     const owner = ownerClock(this.broadcast);
     return {
       codec: this.codec,
-      size: this.canvas?.width ? `${this.canvas.width}x${this.canvas.height}` : '-',
+      size: this.size,
       fps,
       kbps,
       ...this.c,
@@ -410,7 +439,7 @@ class DataTrack implements Track {
       const myOff = clock.myOffsetUs;
       if ((pubOff === null || myOff === null) && tries > 0) return void setTimeout(() => deliver(tries - 1), 50);
       const atUs = pubOff === null || myOff === null ? recvUs : header.captureUs - pubOff + myOff;
-      post({ type: 'data', track: this.path, value, atUs });
+      queueData({ track: this.path, value, atUs });
     };
     deliver(this.delivery === 'stream' ? 20 : 0);
   }
@@ -498,9 +527,12 @@ let session: string | null = null;
 let room: RoomState | null = null;
 const tracks = new Map<Path, Track>();
 const cameras = new Map<Path, Camera>();
-const canvases = new Map<Path, OffscreenCanvas>();
-/** Tracks subscribed on this connection. */
-const subscribed = new Set<Path>();
+/** Widget id -> the track it draws and its canvas. */
+const canvases = new Map<string, { track: Path; canvas: OffscreenCanvas }>();
+/** What the page wants, by track. */
+let wants = new Map<Path, Subscription>();
+/** Tracks subscribed on this connection, with the options sent. */
+const subscribed = new Map<Path, string>();
 /** Locks this session holds: heartbeats go out for each. */
 const held = new Set<Path>();
 /** Next sequence number per channel and lock, as in tq::Session. */
@@ -538,17 +570,53 @@ function trackAt(broadcast: number, track: number): Track | undefined {
   return b && t ? tracks.get(path(b.name, t.info.id)) : undefined;
 }
 
-function watched(info: TrackInfo): boolean {
-  return info.kind === 'video' || (info.kind === 'data' && WATCHED_DATA.includes(info.id));
+let pending: { data: DataItem[]; acks: AckItem[] } | null = null;
+
+function flush() {
+  if (!pending) return;
+  post({ type: 'batch', ...pending });
+  pending = null;
+}
+
+function queue(): { data: DataItem[]; acks: AckItem[] } {
+  if (!pending) {
+    pending = { data: [], acks: [] };
+    setTimeout(flush, BATCH_MS);
+  }
+  return pending;
+}
+
+function queueData(item: DataItem) {
+  queue().data.push(item);
 }
 
 // A new state: subscribe to tracks that appeared, drop those that went
 // away, and follow which locks this session holds.
 function setState(state: RoomState) {
   room = state;
-  const wanted = new Map<Path, { b: BroadcastState; info: TrackInfo }>();
+  sync();
+  held.clear();
   for (const b of state.broadcasts) {
-    for (const t of b.tracks) if (watched(t.info)) wanted.set(path(b.name, t.info.id), { b, info: t.info });
+    for (const l of b.locks) if (session !== null && l.holder === session) held.add(path(b.name, l.info.id));
+  }
+  const waiters = stateWaiters;
+  stateWaiters = [];
+  for (const w of waiters) w();
+}
+
+// Subscriptions follow what the page wants (plus `.status` and `.events`)
+// among the tracks in the room: new ones are subscribed, changed options
+// sent again, and tracks nobody wants any more unsubscribed.
+function sync() {
+  if (!room) return;
+  const wanted = new Map<Path, { b: BroadcastState; info: TrackInfo; sub: Subscription }>();
+  for (const b of room.broadcasts) {
+    for (const t of b.tracks) {
+      const p = path(b.name, t.info.id);
+      const always = t.info.kind === 'data' && WATCHED_DATA.includes(t.info.id);
+      const sub = always ? { track: p } : wants.get(p);
+      if (sub) wanted.set(p, { b, info: t.info, sub });
+    }
   }
   const gone: Path[] = [];
   for (const [p, t] of tracks) {
@@ -561,37 +629,34 @@ function setState(state: RoomState) {
     t.reset();
     tracks.delete(p);
     cameras.delete(p);
-    if (!w) canvases.delete(p);
     if (subscribed.delete(p)) gone.push(p);
   }
-  const fresh: Path[] = [];
-  for (const [p, { b, info }] of wanted) {
+  for (const p of subscribed.keys()) {
+    if (wanted.has(p)) continue;
+    subscribed.delete(p);
+    gone.push(p);
+  }
+  const fresh: Subscription[] = [];
+  for (const [p, { b, info, sub }] of wanted) {
     if (!tracks.has(p)) {
       if (info.kind === 'video') {
         const cam = new Camera(p, b.name);
-        const canvas = canvases.get(p);
-        if (canvas) cam.setCanvas(canvas);
+        for (const [id, c] of canvases) if (c.track === p) cam.addCanvas(id, c.canvas);
         cameras.set(p, cam);
         tracks.set(p, cam);
       } else {
         tracks.set(p, new DataTrack(p, info.data?.delivery ?? 'latest'));
       }
     }
-    if (!subscribed.has(p)) {
-      subscribed.add(p);
-      fresh.push(p);
+    const key = JSON.stringify(sub);
+    if (subscribed.get(p) !== key) {
+      subscribed.set(p, key);
+      fresh.push(sub);
     }
   }
   if (gone.length) sendControl({ type: 'unsubscribe', tracks: gone });
-  if (fresh.length) sendControl({ type: 'subscribe', tracks: fresh });
-
-  held.clear();
-  for (const b of state.broadcasts) {
-    for (const l of b.locks) if (session !== null && l.holder === session) held.add(path(b.name, l.info.id));
-  }
-  const waiters = stateWaiters;
-  stateWaiters = [];
-  for (const w of waiters) w();
+  // Subscribing again replaces a subscription's options.
+  if (fresh.length) sendControl({ type: 'subscribe', tracks: fresh.map((s) => (Object.keys(s).length === 1 ? s.track : s)) });
 }
 
 function nextState(ms: number): Promise<void> {
@@ -728,6 +793,9 @@ async function readDatagrams(t: WebTransport) {
     const rtt = (nowUs() - d.echoUs) / 1000;
     if (d.type === 'ack') {
       stopAcked(d.broadcast, d.channel, d.seq, d.status, d.detail);
+      const b = broadcastAt(d.broadcast);
+      const c = b?.channels.find((x) => x.index === d.channel);
+      if (b && c) queue().acks.push({ channel: path(b.name, c.info.id), seq: d.seq, status: d.status, detail: d.detail, rttMs: rtt });
       teleop.ackRtt.add(rtt);
       teleop.acks[d.status] = (teleop.acks[d.status] ?? 0) + 1;
       if (d.detail) teleop.lastAckDetail = d.detail;
@@ -886,11 +954,20 @@ scope.onmessage = (e) => {
       connectArgs = { url: msg.url, certHash: msg.certHash };
       void connect();
       break;
-    case 'canvas': {
-      canvases.set(msg.track, msg.canvas);
-      cameras.get(msg.track)?.setCanvas(msg.canvas);
+    case 'canvas':
+      canvases.set(msg.id, { track: msg.track, canvas: msg.canvas });
+      cameras.get(msg.track)?.addCanvas(msg.id, msg.canvas);
+      break;
+    case 'uncanvas': {
+      const c = canvases.get(msg.id);
+      canvases.delete(msg.id);
+      if (c) cameras.get(c.track)?.canvases.delete(msg.id);
       break;
     }
+    case 'want':
+      wants = new Map(msg.subs.map((s) => [s.track, s]));
+      sync();
+      break;
     case 'control':
       sendControl(msg.msg);
       break;

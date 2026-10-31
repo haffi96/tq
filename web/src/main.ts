@@ -1,9 +1,10 @@
 // Operator / viewer page. The media worker (worker.ts) does all transport,
-// decoding and drawing; this thread only builds the UI, forwards operator
-// input and shows the numbers.
+// decoding and drawing of video; this thread runs the board (a layout of
+// widgets, board.ts), the remote stop, the room log and the header.
 
+import { Board } from './board';
+import { Catalog } from './catalog';
 import {
-  type BroadcastState,
   type BuildInfo,
   type Control,
   type ParticipantInfo,
@@ -12,14 +13,14 @@ import {
   type RoomEventBody,
   type RoomMessage,
   type RoomState,
-  type TrackInfo,
   compat,
   mismatch,
   path,
   shortBuild,
 } from './protocol';
 import { WEB_BUILD } from './version';
-import type { CameraStats, FromWorker, ToWorker, Window } from './worker';
+import { type App, type TeleopStats, fmt } from './widgets';
+import type { DataItem, FromWorker, ToWorker } from './worker';
 
 /** Set by build.sh from TQ_RELAY_HTTP; empty when the relay serves the page. */
 declare const TQ_RELAY_HTTP: string;
@@ -39,12 +40,6 @@ const DRIVE = 'drive';
 const STOP = 'stop';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) => {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-};
 
 const worker = new Worker('/worker.js', { type: 'module' });
 const send = (msg: ToWorker, transfer: Transferable[] = []) => worker.postMessage(msg, transfer);
@@ -52,83 +47,72 @@ const send = (msg: ToWorker, transfer: Transferable[] = []) => worker.postMessag
 let session: string | null = null;
 let state: RoomState | null = null;
 let relayBuild: BuildInfo | null = null;
+let teleop: TeleopStats | null = null;
 const ownersSeen = new Map<string, string>();
 /** Each broadcast's latest `.status` message. */
 const statuses = new Map<string, RobotStatus>();
-const tiles = new Map<Path, { root: HTMLElement; overlay: HTMLElement; label: HTMLElement }>();
+const catalog = new Catalog();
+const keys = new Set<string>();
+const logLines: { atMs: number; text: string }[] = [];
 
-const fmt = (v: number | null | undefined, digits = 0) => (v === null || v === undefined ? '–' : v.toFixed(digits));
-const win = (w: Window) => (w.avg === null ? '–' : `${w.avg.toFixed(1)}/${w.max!.toFixed(1)}`);
+const lockHolder = (lock: Path) => {
+  const [b, id] = lock.split('/');
+  return state?.broadcasts.find((x) => x.name === b)?.locks.find((l) => l.info.id === id)?.holder ?? null;
+};
 
-// The broadcast the operator drives: the first with a drive lock.
-function driveTarget(): BroadcastState | null {
-  return state?.broadcasts.find((b) => b.locks.some((l) => l.info.id === DRIVE)) ?? null;
+function lockMsg(lock: Path, type: 'claim' | 'release', force = false) {
+  send({ type: 'control', msg: type === 'claim' ? { type, lock, force } : { type, lock } });
 }
 
-// --- tiles -----------------------------------------------------------------
+const DEADZONE = 0.15;
 
-const tileLabel = (p: Path, info: TrackInfo) => (info.label ? `${info.label} · ${p}` : p);
-
-// A tile per video track of every broadcast; tracks that are gone lose
-// theirs. (Called with a state only: a disconnect keeps the tiles.)
-function syncTiles(s: RoomState) {
-  const grid = $('grid');
-  const live = new Set<Path>();
-  for (const b of s.broadcasts) {
-    for (const t of b.tracks) {
-      if (t.info.kind !== 'video') continue;
-      const p = path(b.name, t.info.id);
-      live.add(p);
-      const existing = tiles.get(p);
-      if (existing) {
-        existing.label.textContent = tileLabel(p, t.info);
-        existing.root.classList.toggle('offline', !t.online);
-        continue;
-      }
-      const root = el('div', 'tile');
-      const canvas = el('canvas');
-      const label = el('div', 'label', tileLabel(p, t.info));
-      const overlay = el('pre', 'overlay', 'waiting for keyframe…');
-      const key = el('button', 'small', 'keyframe');
-      key.title = 'Ask the broadcast owner for a keyframe';
-      key.onclick = () => send({ type: 'control', msg: { type: 'keyframe_request', track: p, reason: 'user' } });
-      const bar = el('div', 'tilebar');
-      bar.append(label, key);
-      root.append(canvas, bar, overlay);
-      root.classList.toggle('offline', !t.online);
-      grid.append(root);
-      const offscreen = canvas.transferControlToOffscreen();
-      send({ type: 'canvas', track: p, canvas: offscreen }, [offscreen]);
-      tiles.set(p, { root, overlay, label });
+const app: App = {
+  send,
+  catalog,
+  get session() {
+    return session;
+  },
+  get state() {
+    return state;
+  },
+  operator: preset === 'operator',
+  who,
+  statuses,
+  get teleop() {
+    return teleop;
+  },
+  get logLines() {
+    return logLines.map((l) => l.text);
+  },
+  lock(lock, action) {
+    if (action === 'release') return lockMsg(lock, 'release');
+    if (action === 'force') return lockMsg(lock, 'claim', true);
+    // Claiming while holding claims anew: that re-arms a robot after a
+    // remote stop.
+    if (session && lockHolder(lock) === session) lockMsg(lock, 'release');
+    lockMsg(lock, 'claim');
+  },
+  driveInput(source) {
+    if (source !== 'gamepad' && keys.size > 0) {
+      return {
+        throttle: (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0),
+        steer: (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0),
+      };
     }
-  }
-  for (const [p, tile] of tiles) {
-    if (live.has(p)) continue;
-    tile.root.remove();
-    tiles.delete(p);
-  }
-}
+    if (source !== 'keyboard') {
+      const pad = navigator.getGamepads?.().find((g) => g?.connected);
+      if (pad) {
+        const dz = (v: number | undefined) => (v === undefined || Math.abs(v) < DEADZONE ? 0 : v);
+        const steer = dz(pad.axes[0]);
+        const throttle = -dz(pad.axes[1]);
+        if (steer || throttle) return { throttle, steer };
+      }
+    }
+    return null;
+  },
+};
 
-function renderCameraStats(p: Path, s: CameraStats) {
-  const tile = tiles.get(p);
-  if (!tile) return;
-  // Capture times are the owner's receive time without the encoder's SEI.
-  const sei = s.captureFromSei ? '' : ' (no SEI: capture = publisher time)';
-  tile.overlay.textContent = [
-    `${s.codec ?? '–'} ${s.size}${s.spsPatched ? ' sps-patched' : ''}`,
-    `${fmt(s.fps, 1)} fps  ${fmt(s.kbps)} kbps  q=${s.decodeQueue}`,
-    `frames ${s.frames}  drop ${s.dropped}  gops ${s.groups}  err ${s.errors}`,
-    `ms avg/max${sei}`,
-    `  capture→pub   ${win(s.captureToPublisher)}`,
-    `  pub→relay     ${win(s.publisherToRelay)}`,
-    `  relay→browser ${win(s.relayToBrowser)}`,
-    `  decode        ${win(s.decode)}`,
-    `  capture→drawn ${win(s.captureToDrawn)}`,
-    `  draw→display≈ ${win(s.drawToDisplay)}`,
-    `  glass→glass≈  ${win(s.glassToGlass)}  ±${fmt(s.syncErrorMs, 1)} sync${sensorMs ? ` +${sensorMs} sensor` : ''}`,
-  ].join('\n');
-  tile.root.classList.toggle('stale', s.fps < 0.5);
-}
+const board = new Board($('board'), $('toolbar'), app, `tq.layout.${room}.${preset}`);
 
 // --- versions ----------------------------------------------------------------
 
@@ -164,6 +148,7 @@ function renderVersions() {
   pill.className = `pill ${warn ? 'warn' : ''}`;
 }
 
+
 // --- room state ------------------------------------------------------------
 
 // What a participant may do, from its permissions.
@@ -173,73 +158,59 @@ function kind(p: ParticipantInfo): 'publisher' | 'operator' | 'viewer' {
   return 'viewer';
 }
 
-function renderDeadman(b: BroadcastState | null) {
-  const t = b?.owner ? statuses.get(b.name)?.teleop : undefined;
-  const dm = $('deadman');
-  if (!t) {
-    dm.textContent = 'dead-man: –';
-    dm.className = 'deadman';
-    return;
+// Each robot's dead-man, compactly: whatever the layout shows, the header
+// says when a robot is safe-stopped.
+function renderRobots() {
+  const parts: string[] = [];
+  let tripped = false;
+  for (const b of state?.broadcasts ?? []) {
+    const t = b.owner ? statuses.get(b.name)?.teleop : undefined;
+    if (!t) continue;
+    parts.push(`${b.name} ${t.tripped ? 'SAFE-STOPPED' : 'armed'}`);
+    tripped ||= t.tripped;
   }
-  dm.textContent = t.tripped ? `SAFE-STOPPED: ${t.reason}` : `ARMED · ${who(t.holder)}`;
-  dm.className = `deadman ${t.tripped ? 'tripped' : 'armed'}`;
+  const pill = $('robots');
+  pill.textContent = parts.join(' · ');
+  pill.hidden = !parts.length;
+  pill.className = `pill ${tripped ? 'bad' : 'ok'}`;
 }
 
 function renderState() {
+  catalog.state = state;
   if (!state) {
     // Disconnected: nothing room-dependent is known until the next state.
-    $('claim-status').textContent = '–';
-    $('claim-status').className = 'pill';
     document.body.classList.remove('driving');
     $('publisher').textContent = 'no broadcasts';
     $('publisher').className = 'pill bad';
-    renderDeadman(null);
     $('viewers').textContent = '';
+    renderRobots();
     renderVersions();
+    board.update();
     return;
   }
-  syncTiles(state);
   for (const name of statuses.keys()) if (!state.broadcasts.some((b) => b.name === name)) statuses.delete(name);
-
-  const target = driveTarget();
-  const lock = target?.locks.find((l) => l.info.id === DRIVE);
-  const holder = lock?.holder ?? null;
-  const mine = holder !== null && holder === session;
-  $('claim-status').textContent = !target
-    ? 'no drive lock'
-    : holder === null
-      ? `${target.name}: free`
-      : mine
-        ? `you are driving ${target.name}`
-        : `${target.name}: held by ${who(holder)}`;
-  $('claim-status').className = `pill ${mine ? 'ok' : holder ? 'warn' : ''}`;
-  document.body.classList.toggle('driving', mine);
+  document.body.classList.toggle('driving', !!session && state.broadcasts.some((b) => b.locks.some((l) => l.holder === session)));
 
   const pub = $('publisher');
   if (!state.broadcasts.length) {
     pub.textContent = 'no broadcasts';
     pub.className = 'pill bad';
   } else {
-    pub.textContent = state.broadcasts
-      .map((b) =>
-        b.owner
-          ? `${b.name} · rtt ${fmt(b.rtt_ms, 1)} ms · clock ${fmt(b.clock_offset_us === null ? null : b.clock_offset_us / 1000, 1)} ms`
-          : `${b.name} offline`,
-      )
-      .join('  |  ');
+    pub.textContent = state.broadcasts.map((b) => (b.owner ? `${b.name} · rtt ${fmt(b.rtt_ms, 1)} ms` : `${b.name} offline`)).join('  |  ');
     const offline = state.broadcasts.filter((b) => !b.owner).length;
     pub.className = `pill ${offline === 0 ? 'ok' : offline === state.broadcasts.length ? 'bad' : 'warn'}`;
   }
-  renderDeadman(target);
   const count = (k: ReturnType<typeof kind>) => state!.participants.filter((x) => kind(x) === k).length;
   $('viewers').textContent = `${count('operator')} operator(s), ${count('viewer')} viewer(s), ${count('publisher')} publisher(s)`;
+  renderRobots();
   renderVersions();
+  board.update();
 
   const rows: string[] = [];
   for (const b of state.broadcasts) {
     if (b.quic) {
       rows.push(
-        `${b.name} uplink quic: rtt ${b.quic.rtt_ms.toFixed(1)} ms  cwnd ${(b.quic.cwnd / 1024).toFixed(0)} KiB  lost ${b.quic.lost_packets}/${b.quic.sent_packets}  cong ${b.quic.congestion_events}`,
+        `${b.name} uplink quic: rtt ${b.quic.rtt_ms.toFixed(1)} ms  cwnd ${(b.quic.cwnd / 1024).toFixed(0)} KiB  lost ${b.quic.lost_packets}/${b.quic.sent_packets}  cong ${b.quic.congestion_events}  clock ${fmt(b.clock_offset_us === null ? null : b.clock_offset_us / 1000, 1)} ms`,
       );
     }
     for (const t of b.tracks) {
@@ -257,6 +228,7 @@ function onControl(msg: Control) {
     case 'welcome':
       session = msg.session;
       relayBuild = msg.relay ?? null;
+      catalog.perms = msg.perms;
       log(`relay runs ${describe(relayBuild)}`);
       if (compat(relayBuild) !== 'same') log(`warning: ${mismatch('relay', relayBuild)}`);
       $('session').textContent = `${preset} ${msg.session.slice(0, 8)}`;
@@ -340,114 +312,81 @@ function onRoom(msg: RoomMessage) {
   }
 }
 
-// A message on a broadcast's data track: `.status` feeds the dead-man
-// display, `.events` goes to the log.
-function onData(track: Path, value: unknown, atUs: number) {
-  const [broadcast, name] = track.split('/') as [string, string];
-  if (name === '.status') {
-    const prev = statuses.get(broadcast)?.teleop;
-    const next = value as RobotStatus;
-    statuses.set(broadcast, next);
-    if (prev && next.teleop && prev.tripped !== next.teleop.tripped) {
-      log(next.teleop.tripped ? `${broadcast} safe-stopped: ${next.teleop.reason}` : `${broadcast} armed`);
+// Data track messages: every one feeds the catalog's fields; `.status`
+// also feeds the header, `.events` the log. Then the widgets get them.
+function onData(items: DataItem[]) {
+  const now = performance.now();
+  let robots = false;
+  for (const { track, value, atUs } of items) {
+    catalog.observe(track, value, now);
+    const [broadcast, name] = track.split('/') as [string, string];
+    if (name === '.status') {
+      const prev = statuses.get(broadcast)?.teleop;
+      const next = value as RobotStatus;
+      statuses.set(broadcast, next);
+      if (prev && next.teleop && prev.tripped !== next.teleop.tripped) {
+        log(next.teleop.tripped ? `${broadcast} safe-stopped: ${next.teleop.reason}` : `${broadcast} armed`);
+      }
+      robots = true;
+    } else if (name === '.events') {
+      log(`${broadcast}: ${JSON.stringify(value)}`, atUs / 1000);
     }
-    renderDeadman(driveTarget());
-  } else if (name === '.events') {
-    log(`${broadcast}: ${JSON.stringify(value)}`, atUs / 1000);
   }
+  if (robots) renderRobots();
+  board.data(items);
 }
 
 // Newest first. A line with a time (Unix ms) goes after any newer ones: a
 // broadcast's `.events` replayed on subscribing can be older than lines
 // before it.
-const logLines: { atMs: number; text: string }[] = [];
 function log(line: string, atMs = Date.now()) {
   const i = logLines.findIndex((l) => l.atMs <= atMs);
   logLines.splice(i < 0 ? logLines.length : i, 0, { atMs, text: `${new Date(atMs).toLocaleTimeString()} ${line}` });
-  logLines.length = Math.min(logLines.length, 100);
-  $('log').textContent = logLines.map((l) => l.text).join('\n');
+  logLines.length = Math.min(logLines.length, 200);
+  board.logChanged();
 }
 
-// --- teleop ----------------------------------------------------------------
+// --- remote stop and drive keys ----------------------------------------------
 
-const keys = new Set<string>();
-let streaming = false;
-let lastSent = '';
-
-function driveCommand() {
-  const throttle = (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0);
-  const steer = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
-  return { throttle, steer };
-}
-
-function sendDrive() {
-  const target = driveTarget();
-  if (!target || !target.channels.some((c) => c.info.id === DRIVE)) return;
-  const args = driveCommand();
-  send({ type: 'message', channel: path(target.name, DRIVE), body: { command: 'drive', args } });
-  const desc = `throttle ${args.throttle} steer ${args.steer}`;
-  if (desc !== lastSent) {
-    lastSent = desc;
-    $('drive').textContent = desc;
-  }
-}
-
-// 20 Hz while a key is held or "stream" is on. Stopping the stream lets the
-// robot trip its dead-man after the lock's message_stale_ms, by design.
-// (The relay drops drive messages from sessions that do not hold the lock.)
-setInterval(() => {
-  if (preset !== 'operator') return;
-  if (keys.size > 0 || streaming) sendDrive();
-}, 50);
-
-function lockMsg(type: 'claim' | 'release', force = false) {
-  const target = driveTarget();
-  if (!target) return log('no broadcast with a drive lock');
-  const lock = path(target.name, DRIVE);
-  send({ type: 'control', msg: type === 'claim' ? { type, lock, force } : { type, lock } });
-}
-
-// Remote stop: every robot in the room safe-stops, whoever drives it, and stays
-// stopped until its drive lock is claimed again. This console stops
-// sending and lets go of its own lock too.
+// Remote stop: every robot in the room safe-stops, whoever drives it, and
+// stays stopped until its drive lock is claimed again. This console stops
+// sending and lets go of its own drive locks too. It is not part of any
+// layout, so no layout can remove it.
 function remoteStop() {
   keys.clear();
-  streaming = false;
-  $<HTMLInputElement>('stream').checked = false;
+  board.stopped();
   const targets = state?.broadcasts.filter((b) => b.channels.some((c) => c.info.id === STOP)) ?? [];
   if (!targets.length) log('STOP: no broadcast with a stop channel (not connected?)');
   for (const b of targets) {
     send({ type: 'stop', channel: path(b.name, STOP), body: { reason: 'console' } });
   }
-  const mine = driveTarget()?.locks.find((l) => l.info.id === DRIVE)?.holder === session;
-  if (mine && session) lockMsg('release');
+  $('stop-status').textContent = targets.length ? `STOP sent to ${targets.map((b) => b.name).join(', ')}` : 'STOP: no robot';
+  $('stop-status').className = `pill ${targets.length ? 'warn' : 'bad'}`;
+  if (!session) return;
+  const drives = new Set([...board.driveLocks(), ...(state?.broadcasts ?? []).map((b) => path(b.name, DRIVE))]);
+  for (const lock of drives) if (lockHolder(lock) === session) lockMsg(lock, 'release');
 }
 
+// Fields that take typed text: WASD typed there does not drive.
+const typing = (t: EventTarget | null) =>
+  t instanceof HTMLTextAreaElement ||
+  t instanceof HTMLSelectElement ||
+  (t instanceof HTMLInputElement && !['checkbox', 'radio', 'range', 'button', 'submit'].includes(t.type));
+
 function setupOperator() {
-  $('operator').hidden = false;
-  // Claiming while holding claims anew: that re-arms a robot after an
-  // remote stop.
-  $('claim').onclick = () => {
-    if (driveTarget()?.locks.find((l) => l.info.id === DRIVE)?.holder === session && session) lockMsg('release');
-    lockMsg('claim');
-  };
-  $('force').onclick = () => lockMsg('claim', true);
-  $('release').onclick = () => lockMsg('release');
-  $('once').onclick = sendDrive;
+  $('stop').hidden = false;
   $('stop').onclick = remoteStop;
-  const stream = $<HTMLInputElement>('stream');
-  stream.onchange = () => (streaming = stream.checked);
   window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
-    if (['w', 'a', 's', 'd'].includes(k)) {
+    if (['w', 'a', 's', 'd'].includes(k) && !typing(e.target) && !e.metaKey && !e.ctrlKey) {
       keys.add(k);
       e.preventDefault();
     }
   });
   window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
-  // Space is STOP, before anything else sees it (capture phase): a
-  // focused button or checkbox would otherwise take it as a click too (a
-  // focused Claim would re-claim, the stream box would stream again).
+  // Space is STOP, everywhere, before anything else sees it (capture
+  // phase): a focused button or checkbox would otherwise take it as a click
+  // too (a focused Claim would re-claim, a stream box would stream again).
   window.addEventListener(
     'keydown',
     (e) => {
@@ -491,34 +430,27 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
     case 'room':
       onRoom(msg.msg);
       break;
-    case 'data':
-      onData(msg.track, msg.value, msg.atUs);
+    case 'batch':
+      if (msg.data.length) onData(msg.data);
+      if (msg.acks.length) board.acks(msg.acks);
       break;
-    case 'stop':
-      log(
-        msg.acked
-          ? `STOP ${msg.channel}: robot ${msg.status === 'ok' ? 'stopped' : `answered ${msg.status} ${msg.detail ?? ''}`}`
-          : `STOP ${msg.channel}: NO ANSWER from the robot in 2 s`,
-      );
+    case 'stop': {
+      const line = msg.acked
+        ? `STOP ${msg.channel}: robot ${msg.status === 'ok' ? 'stopped' : `answered ${msg.status} ${msg.detail ?? ''}`}`
+        : `STOP ${msg.channel}: NO ANSWER from the robot in 2 s`;
+      log(line);
+      $('stop-status').textContent = line;
+      $('stop-status').className = `pill ${msg.acked && msg.status === 'ok' ? 'ok' : 'bad'}`;
       break;
+    }
     case 'stats': {
-      for (const [p, s] of Object.entries(msg.cameras)) renderCameraStats(p, s);
+      board.cameras(msg.cameras);
+      teleop = msg.teleop;
       $('clock').textContent = `relay rtt ${fmt(msg.clock.relayRttMs, 1)} ms · clock ${fmt(msg.clock.offsetMs, 1)} ms ±${fmt(msg.clock.errorMs, 1)} · ${fmt(1000 / msg.clock.refreshMs, 0)} Hz`;
-      const t = msg.teleop;
-      if (preset === 'operator') {
-        const target = driveTarget();
-        const status = target ? statuses.get(target.name)?.teleop : undefined;
-        $('teleop-stats').textContent = [
-          `ack rtt ${win(t.ackRtt)} ms   heartbeat rtt ${win(t.heartbeatRtt)} ms`,
-          `acks ${Object.entries(t.acks)
-            .map(([k, v]) => `${k}=${v}`)
-            .join(' ') || '–'}${t.lastAckDetail ? `   last: ${t.lastAckDetail}` : ''}`,
-          `robot (via heartbeat echo): ${t.tripped === null ? '–' : t.tripped ? 'tripped' : 'armed'}`,
-          status
-            ? `robot (via .status): commands ${status.commands}  last seq ${status.last_seq}  remote stops ${status.stops}`
-            : 'robot (via .status): –',
-        ].join('\n');
-      }
+      const ui = board.takeUiStats();
+      $('ui').textContent = `ui ${ui.avg.toFixed(2)} ms/frame · max ${ui.max.toFixed(1)}`;
+      $('ui').className = `pill ${ui.max > 8 ? 'warn' : ''}`;
+      $('ui').title = 'Main-thread time drawing widgets per display frame. Video is drawn in the media worker and does not wait for it.';
       break;
     }
   }
@@ -530,6 +462,8 @@ async function start() {
   $('title').textContent = room;
   $('role').textContent = preset;
   if (preset === 'operator') setupOperator();
+  const edit = $('edit');
+  edit.onclick = () => board.setEditing(!board.editing);
   renderVersions();
   // The relay's HTTP base: ?relay_http=, else the one baked in at build
   // time (TQ_RELAY_HTTP), else this page's origin (the relay serves it).

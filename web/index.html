@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>tq · teleop over QUIC</title>
+    <title>tq · tele over QUIC</title>
     <link rel="icon" href="/favicon.ico" sizes="48x48" />
     <link rel="icon" href="/icons/icon-32.png" type="image/png" sizes="32x32" />
     <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192" />
@@ -18,35 +18,27 @@
       <span id="session" class="pill"></span>
       <span id="conn" class="pill warn">starting</span>
       <span id="publisher" class="pill">broadcasts –</span>
+      <span id="robots" class="pill" hidden></span>
+      <button id="stop" hidden title="Every robot in the room safe-stops at once, whoever drives it, and stays stopped until its drive lock is claimed again (Space)">STOP</button>
+      <span id="stop-status" class="pill"></span>
+      <span class="spacer"></span>
       <span id="clock" class="pill"></span>
+      <span id="ui" class="pill"></span>
       <span id="viewers" class="pill"></span>
       <span id="versions" class="pill"></span>
+      <button id="edit" title="Add, move, resize and bind widgets">Edit layout</button>
     </header>
 
-    <section id="operator" hidden>
-      <div class="row">
-        <span id="claim-status" class="pill">free</span>
-        <button id="claim">Claim</button>
-        <button id="force">Force claim</button>
-        <button id="release">Release</button>
-        <button id="stop" title="Every robot in the room safe-stops at once, whoever drives it, and stays stopped until its drive lock is claimed again (Space)">STOP</button>
-        <span id="deadman" class="deadman">dead-man: –</span>
-      </div>
-      <div class="row">
-        <span>Drive: hold <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> (20 Hz) · <kbd>Space</kbd> = STOP</span>
-        <label><input type="checkbox" id="stream" /> stream 20 Hz</label>
-        <button id="once">Send one drive command</button>
-        <span id="drive" class="pill">throttle 0 steer 0</span>
-      </div>
-      <pre id="teleop-stats"></pre>
-    </section>
+    <div id="toolbar" class="row" hidden></div>
 
-    <main id="grid"></main>
+    <main id="board"></main>
 
     <footer>
-      <pre id="publisher-detail"></pre>
-      <pre id="link"></pre>
-      <pre id="log"></pre>
+      <details>
+        <summary>Diagnostics</summary>
+        <pre id="publisher-detail"></pre>
+        <pre id="link"></pre>
+      </details>
     </footer>
     <script type="module" src="/main.js"></script>
   </body>

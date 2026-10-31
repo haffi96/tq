@@ -4,6 +4,10 @@
 #
 #   dev/run-local.sh                 # direct
 #   IMPAIR=starlink dev/run-local.sh # robot uplink through the Starlink profile
+#   CONFIG=config/edge.full.example.json dev/run-local.sh
+#                                    # adds telemetry, lights and a teleop sink,
+#                                    # fed by dev/fake-device.ts (FAKE_DEVICE=1
+#                                    # starts it with any config)
 #
 # Needs streaming-tools (https://github.com/haffi96/streaming-tools) next to
 # this repo, or STREAMING_TOOLS=...
@@ -26,6 +30,11 @@ if [[ -z "${NO_SOURCES:-}" ]]; then
   (cd "$STREAMING_TOOLS/tools/gstreamer_source" && exec uv run gstreamer-source --port 5010 --timestamps) &
   pids+=($!)
   (cd "$STREAMING_TOOLS/tools/gstreamer_source" && exec uv run gstreamer-source --codec h265 --stream-format avc --port 5011 --timestamps) &
+  pids+=($!)
+fi
+
+if [[ -n "${FAKE_DEVICE:-}" || "$CONFIG" == *full* ]]; then
+  bun dev/fake-device.ts &
   pids+=($!)
 fi
 
