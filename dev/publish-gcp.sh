@@ -7,11 +7,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 STREAMING_TOOLS=${STREAMING_TOOLS:-$ROOT/../streaming-tools}
-CONFIG=${CONFIG:-config/publisher.gcp.json}
+CONFIG=${CONFIG:-config/edge.gcp.json}
 TQ_SHARED_SECRET=$(terraform -chdir=infra/gcp output -raw shared_secret)
 export TQ_SHARED_SECRET
 
-cargo build --release -q -p tq-publisher
+cargo build --release -q -p tq-edge
 
 pids=()
 cleanup() { kill "${pids[@]}" 2>/dev/null || true; }
@@ -23,7 +23,7 @@ pids+=($!)
 pids+=($!)
 sleep 2
 
-./target/release/tq-publisher --config "$CONFIG" &
+./target/release/tq-edge --config "$CONFIG" &
 pids+=($!)
 
 # Stop everything when any one exits, with its status. (No `wait -n`: macOS

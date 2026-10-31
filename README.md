@@ -26,7 +26,7 @@ complete example.
 
 ```text
  Robot                                   Cloud relay                        Consoles
- encoder --TCP--> tq-publisher ==WT==>  tq-relay  ==WebTransport==>  web page / tq-app
+ encoder --TCP--> tq-edge ==WT==>  tq-relay  ==WebTransport==>  web page / tq-app
  H.264/H.265      broadcast "rover":    caches, fans out per            subscribe to tracks,
                   video, .status,       subscription, checks            claim the drive lock,
                   drive lock + chan.  <== permissions and locks <==      send drive commands
@@ -45,15 +45,15 @@ where this is going is in [docs/roadmap.md](docs/roadmap.md).
 | `crates/tq-media` | Elementary stream handling: NAL framing (Annex B or 4-byte length-prefixed, auto-detected), access unit assembly, SEI capture timestamps, codec strings, parameter set repetition. No decoding. |
 | `crates/tq-relay` | Relay binary: one WebTransport endpoint for every session, HTTP for the web app, `/api/cert`, `/api/rooms` and dev tokens. Nothing teleop-specific. |
 | `crates/tq-teleop` | Teleop on the SDK: drive and remote stop channels, the dead-man as a lock watchdog, robot status. |
-| `crates/tq-publisher` | Robot-side binary: reads the TCP camera sources and publishes them, with teleop, as one broadcast. |
+| `crates/tq-edge` | The agent on the device: publishes one broadcast from its config. Tracks are fed by sources (TCP encoder streams, JSON lines), channels feed sinks (TCP JSON lines, log), and teleop is optional. |
 | `crates/tq-tools` | `tq-impair` (Starlink-like UDP impairment proxy) and `tq-probe` (headless console: subscribes to every track and reports per-hop latency; can drive). |
 | `crates/tq-app` | Native console (GPUI; VideoToolbox on macOS, NVDEC on Linux). Not built by a plain `cargo build`. |
 | `web/` | Browser console in TypeScript, built with bun. `worker.ts` owns WebTransport, WebCodecs and OffscreenCanvas; `main.ts` is the UI. |
-| `config/` | Publisher configs: `publisher.example.json` (H.264 + H.265 test sources), `publisher.prodlike.json` (one H.265 camera, 10 fps, 2 Mbps, length-prefixed, like a typical robot camera). |
+| `config/` | tq-edge configs: `edge.example.json` (H.264 + H.265 test sources, teleop), `edge.full.example.json` (adds a data track and a channel), `edge.prodlike.json` (one H.265 camera, 10 fps, 2 Mbps, length-prefixed, like a typical robot camera). See [install.md](docs/install.md#the-config). |
 | `dev/run-local.sh` | Starts the whole stack on one machine. |
 | `dev/release.sh` | Bumps a component's version; CI uses it to check tags and write release notes. |
 | `build/version.rs` | Build script shared by the binaries: stamps the git commit into `--version` and the handshake. |
-| `packaging/` | Publisher tarball/`.deb`/`install.sh` and service files, the relay's Dockerfile, the app's `.dmg` bundler. |
+| `packaging/` | tq-edge tarball/`.deb`/`install.sh` and service files, the relay's Dockerfile, the app's `.dmg` bundler. |
 | `infra/gcp/` | Terraform for the relay on GCP (London VM, Let's Encrypt, Cloudflare DNS). The web app deploys to Cloudflare from `web/` with wrangler. |
 | `assets/brand/` | The logo (`source.svg`) and `make.py`, which draws the favicon, app icons, GitHub avatar and social preview from it. |
 | `docs/` | [protocol-3.md](docs/protocol-3.md), [roadmap.md](docs/roadmap.md), [install.md](docs/install.md). |
@@ -92,8 +92,8 @@ are complete examples.
 
 ## Versions and releases
 
-The publisher, the relay (with the web app inside) and tq-app are released
-separately, each from its own tag (`publisher-v*`, `relay-v*`, `app-v*`).
+tq-edge, the relay (with the web app inside) and tq-app are released
+separately, each from its own tag (`edge-v*`, `relay-v*`, `app-v*`).
 They only need to agree on the protocol's major version. Every session
 exchanges each side's version, commit and protocol. A different minor shows
 a warning; a different major is refused. tq-app's status bar and the web
@@ -222,7 +222,7 @@ export TQ_SHARED_SECRET=dev-secret-change-me
 cargo build --release
 (cd web && bun install && bun run build)
 ./target/release/tq-relay --dev --web-dir web/dist                      # QUIC :4443, HTTP :8080
-./target/release/tq-publisher --config config/publisher.example.json
+./target/release/tq-edge --config config/edge.example.json
 ./target/release/tq-probe --preset operator --teleop-hz 20 --duration 20   # headless check
 ```
 
@@ -236,14 +236,14 @@ over HTTP, and it never mints tokens that may publish.
 When no `--cert/--key` is given, the relay generates a self-signed ECDSA
 certificate valid for 10 days. Browsers then pin it with
 `serverCertificateHashes`: the page reads the hash from `/api/cert`, and the
-publisher uses `relay_trust: hash_url`. The page itself must be a secure
+tq-edge uses `relay.trust: hash_url`. The page itself must be a secure
 context, which means either `http://localhost` or HTTPS. For a real
 deployment, give the relay a Let's Encrypt certificate (`--cert/--key`) and
 use `relay_trust: system_roots`.
 
 ### Source framing
 
-The publisher completes an access unit as soon as it knows the AU is over:
+tq-edge completes an access unit as soon as it knows the AU is over:
 
 - A **length-prefixed** NAL is complete as soon as its last byte arrives.
 - An **Annex B** NAL is only complete when the next start code arrives.
@@ -385,7 +385,7 @@ below) and pass the result as `?sensor_ms=`.
   offsets then only cross-check them.
 
 Results from 2026-10-06 on one MacBook, protocol 2.0: VideoToolbox test sources, links
-emulated with `tq-impair` on the publisher uplink only, 45 s per run. These
+emulated with `tq-impair` on the robot uplink only, 45 s per run. These
 are emulated links, not real Starlink.
 
 | Source | Link | capture→probe p50 / p95 | pub→relay p50 / p95 | teleop RTT p50 / p95 |

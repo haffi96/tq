@@ -4,7 +4,7 @@ Each part of tq is versioned and released on its own:
 
 | Component | Version in | Tag | What a release contains |
 | --- | --- | --- | --- |
-| Publisher | `crates/tq-publisher/Cargo.toml` | `publisher-vX.Y.Z` | Tarballs for Linux x86_64, Linux aarch64 and macOS arm64, `.deb` files for Linux, `install.sh`, `SHA256SUMS` |
+| Edge agent | `crates/tq-edge/Cargo.toml` | `edge-vX.Y.Z` | Tarballs for Linux x86_64, Linux aarch64 and macOS arm64, `.deb` files for Linux, `install.sh`, `SHA256SUMS` |
 | Relay | `crates/tq-relay/Cargo.toml` | `relay-vX.Y.Z` | The container image `ghcr.io/haffi96/tq-relay:X.Y.Z`, with the web app inside |
 | Web app | `web/package.json` | none | Nothing on its own. It ships inside the relay image. |
 | Native app | `crates/tq-app/Cargo.toml` | `app-vX.Y.Z` | macOS: `.dmg` to install, `.zip` for the in-app updater. Linux: `.tar.gz` for both. `SHA256SUMS` over all of them. |
@@ -33,34 +33,35 @@ Every session starts with each side's build: version, commit and protocol.
 Protocol 3.0 ([protocol-3.md](protocol-3.md)) replaced roles with
 permissions and cameras with broadcasts of tracks, channels and locks, and
 moved every session to one endpoint, `/v1/room/{room}`. 2.x and 3.x peers
-refuse each other: upgrade the relay, publishers and apps together. The
-publisher config's `publisher_id` is now `broadcast` (the old key still
-works) and defaults to the room id.
+refuse each other: upgrade the relay, devices and apps together.
+tq-publisher became tq-edge, with a new config format
+(`config/edge.example.json`): tracks with sources, channels with sinks,
+and optional teleop.
 
-**Rollout order:** relay first, then publishers and apps. The relay accepts
-any minor of its own major, so publishers and apps can follow at their own
-pace.
+**Rollout order:** relay first, then devices (tq-edge) and apps. The relay
+accepts any minor of its own major, so devices and apps can follow at
+their own pace.
 
 ### Seeing versions
 
 - **tq-app:**
-  - The status bar reads `app 0.1.0 · relay 0.1.0 · publisher 0.1.0`. Each
+  - The status bar reads `app 0.1.0 · relay 0.1.0 · robot-01 0.1.0`. Each
     entry turns amber on a protocol mismatch.
   - The sidebar's **About** section shows each component's commit and
     protocol.
   - The events panel logs each version when a session connects.
 - **Web page:** the `versions` pill in the header. Hover over it to see the
   commits.
-- **CLIs:** `tq-relay --version`, `tq-publisher --version` and
-  `tq-app --version` print `0.1.0 (a1b2c3d4e5) protocol 2.0`.
+- **CLIs:** `tq-relay --version`, `tq-edge --version` and
+  `tq-app --version` print `0.1.0 (a1b2c3d4e5) protocol 3.0`.
   A `-dirty` suffix on the commit means the binary was built from a tree
   with uncommitted changes.
 - **Relay HTTP:**
   - `GET /api/info` returns `build`, the relay's own build.
   - `GET /api/rooms?token=…` lists the rooms the token is valid for, with
-    each publisher's `build` and each room's participants.
+    each broadcast's `build` and each room's participants.
 - **Logs:** each binary logs its build at startup. The relay logs the build
-  of every publisher and client that connects.
+  of every session that connects.
 
 ## Releasing
 
@@ -72,7 +73,7 @@ git push origin HEAD relay-v0.2.0
 ```
 
 The tag starts that component's workflow
-(`.github/workflows/release-{publisher,relay,app}.yml`). The workflow:
+(`.github/workflows/release-{edge,relay,app}.yml`). The workflow:
 1. Checks that the tag matches the version in the source.
 2. Builds, tests and packages the component.
 3. Creates a GitHub release. Its notes list the commits that touched the
@@ -101,9 +102,9 @@ token. If one is available, they use it:
 A token raises GitHub's API rate limit, which matters when many machines
 install at once from one address. It is also what lets a private fork work.
 
-## Publisher
+## Edge agent (tq-edge)
 
-The publisher has no GPU dependency: it forwards streams that are already
+tq-edge runs on the device. It has no GPU dependency: it forwards streams that are already
 encoded. It is one binary per platform, built for glibc 2.31 and newer, so
 it runs on:
 - Linux aarch64: desktops with a discrete GPU, Jetson Orin Nano
@@ -114,16 +115,16 @@ it runs on:
 ### Option 1: install script (Linux and macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/haffi96/tq/main/packaging/publisher/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/haffi96/tq/main/packaging/edge/install.sh | bash
 ```
 
 Options go after `bash -s --`, for example
-`… | bash -s -- --version 0.2.0`:
+`… | bash -s -- --version 0.1.0`:
 
 | Option | Effect |
 | --- | --- |
-| `--version X.Y.Z` | A specific release. Default: the newest `publisher-v*`. |
-| `--file tq-publisher-….tar.gz` | Install from a tarball you downloaded. No network. |
+| `--version X.Y.Z` | A specific release. Default: the newest `edge-v*`. |
+| `--file tq-edge-….tar.gz` | Install from a tarball you downloaded. No network. |
 | `--prefix DIR` | The binary goes to `DIR/bin`. Default `/usr/local`. |
 | `--config-dir DIR` | Default `/etc/tq`. |
 | `--no-service` | Do not install or restart the service. |
@@ -132,14 +133,14 @@ Options go after `bash -s --`, for example
 The script:
 1. Picks the tarball for this OS and CPU.
 2. Checks it against `SHA256SUMS`.
-3. Installs `tq-publisher` to `/usr/local/bin`.
-4. On first install only, creates `/etc/tq/publisher.json` from the example
-   and `/etc/tq/publisher.env` for secrets. Later installs leave both alone.
+3. Installs `tq-edge` to `/usr/local/bin`.
+4. On first install only, creates `/etc/tq/edge.json` from the example
+   and `/etc/tq/edge.env` for secrets. Later installs leave both alone.
 5. Installs the service:
-   - **Linux:** a systemd unit, `tq-publisher.service`, running as the `tq`
+   - **Linux:** a systemd unit, `tq-edge.service`, running as the `tq`
      system user.
-   - **macOS:** a launchd daemon, `/Library/LaunchDaemons/dev.tq.publisher.plist`,
-     logging to `/var/log/tq-publisher.log`.
+   - **macOS:** a launchd daemon, `/Library/LaunchDaemons/dev.tq.edge.plist`,
+     logging to `/var/log/tq-edge.log`.
 6. On a first install, it tells you to edit the config and start the
    service. On an upgrade, it restarts the service.
 
@@ -148,37 +149,70 @@ Run the same command again to upgrade.
 ### Option 2: .deb (Ubuntu, Debian, JetPack)
 
 ```sh
-curl -fLO https://github.com/haffi96/tq/releases/download/publisher-v0.2.0/tq-publisher_0.2.0_arm64.deb   # or _amd64
-sudo apt install ./tq-publisher_0.2.0_arm64.deb
+curl -fLO https://github.com/haffi96/tq/releases/download/edge-v0.1.0/tq-edge_0.1.0_arm64.deb   # or _amd64
+sudo apt install ./tq-edge_0.1.0_arm64.deb
 ```
 
 The `.deb` installs the same binary to `/usr/bin` and the unit to
 `/lib/systemd/system`. It creates the `tq` user and seeds `/etc/tq` once,
 the same way the script does. Upgrades restart the service if it is
-running. `apt purge tq-publisher` removes `/etc/tq`.
+running. `apt purge tq-edge` removes `/etc/tq`.
 
 Use one method per machine. The script refuses to run while the `.deb` is
 installed, unless you pass `--force`.
 
 ### Configure and run
 
-1. Edit `/etc/tq/publisher.json`. See `config/publisher.example.json` and
-   `config/publisher.prodlike.json`: set `room_id`, `relay_url`,
-   `relay_trust` and the cameras.
-2. Put the token secret in `/etc/tq/publisher.env`:
+1. Edit `/etc/tq/edge.json` (see [the config](#the-config) below): set
+   `room`, `relay.url`, `relay.trust` and the tracks.
+2. Put the token secret in `/etc/tq/edge.env`:
    ```sh
    TQ_SHARED_SECRET=…
    ```
 3. Start it:
-   - Linux: `sudo systemctl start tq-publisher`, and follow the logs with
-     `journalctl -u tq-publisher -f`.
-   - macOS: `sudo launchctl bootstrap system /Library/LaunchDaemons/dev.tq.publisher.plist`.
+   - Linux: `sudo systemctl start tq-edge`, and follow the logs with
+     `journalctl -u tq-edge -f`.
+   - macOS: `sudo launchctl bootstrap system /Library/LaunchDaemons/dev.tq.edge.plist`.
+
+### The config
+
+`config/edge.example.json` publishes two cameras with teleop;
+`config/edge.full.example.json` adds a data track and a channel. A config
+names the room, the relay, and the broadcast's parts:
+
+- **`tracks`**: each has an `id`, a `kind` (`video` or `data`) and a
+  `source`. Today's source is `{"type": "tcp", "addr": "host:port"}`:
+  tq-edge connects to that server and reads from it, reconnecting as
+  needed.
+  - Video: an H.264/H.265 byte stream (an encoder's TCP server, such as
+    GStreamer's `tcpserversink`). Options: `codec` and `framing` (both
+    `auto` by default), `complete_on_vcl`.
+  - Data (`"data": {"encoding": "json", "delivery": "latest"}`): one
+    message per line, or with `"framing": "length_prefixed"`, per
+    big-endian `u32` length. JSON messages that do not parse are dropped.
+
+  Any program that writes to a socket is a source; no Rust needed.
+- **`channels`**: messages into the device, each to a `sink`: `log`, or
+  `{"type": "tcp", "addr": "host:port"}`, where tq-edge connects to your
+  program and writes one JSON line per message
+  (`{"type":"message","channel":…,"from_sid":…,"seq":…,"payload":…}`).
+  While that program is not connected, messages are refused, so senders
+  see it in their acks.
+- **`teleop`** (optional): a `drive` channel behind a dead-man lock, and
+  the remote stop. Its `sink` gets `{"type":"command",…}` lines while
+  armed and `{"type":"safe_stop","reason":…}` on every trip, and a
+  `safe_stop` first whenever it connects. The motion program must also
+  stop by itself if that connection drops. None of this replaces a
+  hardware E-stop.
+
+`tq-edge --config` checks the whole config at startup and lists every
+problem it finds.
 
 ### Building the packages by hand
 
 ```sh
-cargo zigbuild --release -p tq-publisher --target aarch64-unknown-linux-gnu.2.31   # brew install zig; cargo install cargo-zigbuild
-packaging/publisher/package.sh 0.2.0 linux-aarch64 target/aarch64-unknown-linux-gnu/release/tq-publisher dist
+cargo zigbuild --release -p tq-edge --target aarch64-unknown-linux-gnu.2.31   # brew install zig; cargo install cargo-zigbuild
+packaging/edge/package.sh 0.1.0 linux-aarch64 target/aarch64-unknown-linux-gnu/release/tq-edge dist
 ```
 
 zig is only needed to build. It cross-compiles the C code in the TLS

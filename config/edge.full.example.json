@@ -1,0 +1,87 @@
+{
+  "room": "robot-01",
+  "relay": {
+    "url": "https://127.0.0.1:4443",
+    "trust": {
+      "mode": "hash_url",
+      "url": "http://127.0.0.1:8080/api/cert"
+    },
+    "shared_secret": "dev-secret-change-me",
+    "max_lag_ms": 400,
+    "quic": {
+      "congestion": "bbr",
+      "send_window": 1048576
+    }
+  },
+  "tracks": [
+    {
+      "id": "front",
+      "label": "Front (H.264)",
+      "kind": "video",
+      "video": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30
+      },
+      "source": {
+        "type": "tcp",
+        "addr": "127.0.0.1:5010"
+      }
+    },
+    {
+      "id": "rear",
+      "label": "Rear (H.265)",
+      "kind": "video",
+      "video": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30
+      },
+      "source": {
+        "type": "tcp",
+        "addr": "127.0.0.1:5011"
+      }
+    },
+    {
+      "id": "telemetry",
+      "label": "Telemetry",
+      "kind": "data",
+      "data": {
+        "encoding": "json",
+        "delivery": "latest",
+        "rate_hz": 20
+      },
+      "meta": {
+        "units": {
+          "battery_v": "V",
+          "speed": "m/s"
+        }
+      },
+      "source": {
+        "type": "tcp",
+        "addr": "127.0.0.1:6000"
+      }
+    }
+  ],
+  "teleop": {
+    "heartbeat_loss_ms": 500,
+    "command_stale_ms": 500,
+    "sink": {
+      "type": "tcp",
+      "addr": "127.0.0.1:6002"
+    }
+  },
+  "channels": [
+    {
+      "id": "lights",
+      "label": "Lights",
+      "schema": {
+        "on": "bool"
+      },
+      "sink": {
+        "type": "tcp",
+        "addr": "127.0.0.1:6001"
+      }
+    }
+  ]
+}

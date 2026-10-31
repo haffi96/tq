@@ -2,7 +2,7 @@
 # Release helpers. Each component is released on its own, from a tag:
 #
 #   component  version lives in                 tag              artifacts
-#   publisher  crates/tq-publisher/Cargo.toml  publisher-vX.Y.Z  tarballs, .debs, install.sh
+#   edge       crates/tq-edge/Cargo.toml       edge-vX.Y.Z      tarballs, .debs, install.sh
 #   relay      crates/tq-relay/Cargo.toml      relay-vX.Y.Z     ghcr.io/<owner>/tq-relay image
 #   app        crates/tq-app/Cargo.toml        app-vX.Y.Z       .dmg, .zip (self-update)
 #   web        web/package.json                (none: ships inside the relay image)
@@ -15,9 +15,9 @@ cd "$(dirname "$0")/.."
 
 file_of() {
   case "$1" in
-    publisher | relay | app) echo "crates/tq-$1/Cargo.toml" ;;
+    edge | relay | app) echo "crates/tq-$1/Cargo.toml" ;;
     web) echo web/package.json ;;
-    *) echo "unknown component $1 (publisher, relay, app, web)" >&2; exit 2 ;;
+    *) echo "unknown component $1 (edge, relay, app, web)" >&2; exit 2 ;;
   esac
 }
 
@@ -33,7 +33,7 @@ version_of() {
 # What a component's release contains, for its notes.
 paths_of() {
   case "$1" in
-    publisher) echo crates/tq-publisher crates/tq-wire crates/tq-transport crates/tq-media build packaging/publisher config ;;
+    edge) echo crates/tq-edge crates/tq crates/tq-teleop crates/tq-wire crates/tq-transport crates/tq-media build packaging/edge config ;;
     relay) echo crates/tq-relay crates/tq-wire crates/tq-transport build packaging/relay web ;;
     app) echo crates/tq-app crates/tq-wire crates/tq-transport crates/tq-media build packaging/app ;;
   esac

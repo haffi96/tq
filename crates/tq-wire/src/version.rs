@@ -5,9 +5,8 @@
 //! peer cannot ignore. Peers with different majors refuse each other
 //! ([`crate::code::UNSUPPORTED_VERSION`]); a different minor only warns.
 //!
-//! Every component sends its [`BuildInfo`] in its first message (publisher
-//! `Announce`, client `Hello`; the relay in `Welcome`, `AnnounceOk` and
-//! `/api/info`). Those fields, `Hello` and the close code must keep their
+//! Every session sends its [`BuildInfo`] in its first message, `Hello`; the
+//! relay sends its own in `Welcome` and at `/api/info`. Those fields, `Hello` and the close code must keep their
 //! shape across majors, so that peers can still tell each other apart.
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,7 @@ impl std::fmt::Display for ProtocolVersion {
 /// Who a peer is: sent in the first message of each session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildInfo {
-    /// `tq-relay`, `tq-publisher`, `tq-app`, `tq-web`, `tq-probe`, ….
+    /// `tq-relay`, `tq-edge`, `tq-app`, `tq-web`, `tq-probe`, ….
     pub component: String,
     /// The component's own semver.
     pub version: String,

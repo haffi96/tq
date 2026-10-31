@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Installs or upgrades tq-publisher from GitHub Releases (tags publisher-vX.Y.Z)
+# Installs or upgrades tq-edge from GitHub Releases (tags edge-vX.Y.Z)
 # on Linux (x86_64, aarch64) and macOS (Apple silicon), as a systemd or
 # launchd service.
 #
 #   curl -fsSL <raw url of this file> | bash                   # newest release
 #   curl -fsSL <raw url of this file> | bash -s -- --version 0.2.0
-#   ./install.sh --file tq-publisher-0.2.0-linux-aarch64.tar.gz  # offline
+#   ./install.sh --file tq-edge-0.2.0-linux-aarch64.tar.gz  # offline
 #   ./install.sh --uninstall
 #
 # No token needed. A GITHUB_TOKEN (or `gh` login) is used when present, which
 # raises GitHub's API rate limit. See docs/install.md.
 #
-# Layout: <prefix>/bin/tq-publisher (default /usr/local), the config in
-# /etc/tq/publisher.json and secrets in /etc/tq/publisher.env (both kept on
+# Layout: <prefix>/bin/tq-edge (default /usr/local), the config in
+# /etc/tq/edge.json and secrets in /etc/tq/edge.env (both kept on
 # upgrade). On Linux the service runs as the `tq` system user.
 set -euo pipefail
 
 REPO=${TQ_REPO:-haffi96/tq}
 API=${TQ_API:-https://api.github.com}
-TAG_PREFIX=publisher-v
+TAG_PREFIX=edge-v
 VERSION=""
 FILE=""
 PREFIX=/usr/local
@@ -29,7 +29,7 @@ FORCE=0
 
 usage() {
   cat <<EOF
-Installs or upgrades tq-publisher from GitHub Releases ($REPO).
+Installs or upgrades tq-edge from GitHub Releases ($REPO).
 
 Options:
   --version X.Y.Z     install this release instead of the newest
@@ -80,19 +80,19 @@ if [ "$(id -u)" -ne 0 ]; then
   fi
 fi
 
-BIN="$PREFIX/bin/tq-publisher"
-UNIT=/etc/systemd/system/tq-publisher.service
-PLIST=/Library/LaunchDaemons/dev.tq.publisher.plist
+BIN="$PREFIX/bin/tq-edge"
+UNIT=/etc/systemd/system/tq-edge.service
+PLIST=/Library/LaunchDaemons/dev.tq.edge.plist
 systemd() { [ "$OS" = Linux ] && [ -d /run/systemd/system ]; }
 
 if [ $UNINSTALL = 1 ]; then
   if [ $SERVICE = 1 ] && systemd && [ -f $UNIT ]; then
-    $SUDO systemctl disable --now tq-publisher || true
+    $SUDO systemctl disable --now tq-edge || true
     $SUDO rm -f $UNIT
     $SUDO systemctl daemon-reload
   fi
   if [ $SERVICE = 1 ] && [ "$OS" = Darwin ] && [ -f $PLIST ]; then
-    $SUDO launchctl bootout system/dev.tq.publisher 2>/dev/null || true
+    $SUDO launchctl bootout system/dev.tq.edge 2>/dev/null || true
     $SUDO rm -f $PLIST
   fi
   $SUDO rm -f "$BIN"
@@ -101,8 +101,8 @@ if [ $UNINSTALL = 1 ]; then
 fi
 
 if [ "$OS" = Linux ] && [ $FORCE = 0 ] && command -v dpkg-query >/dev/null &&
-  dpkg-query -W -f='${Status}' tq-publisher 2>/dev/null | grep -q "install ok installed"; then
-  die "tq-publisher is installed from the .deb; upgrade with apt/dpkg, or pass --force"
+  dpkg-query -W -f='${Status}' tq-edge 2>/dev/null | grep -q "install ok installed"; then
+  die "tq-edge is installed from the .deb; upgrade with apt/dpkg, or pass --force"
 fi
 
 WORK=$(mktemp -d)
@@ -119,7 +119,7 @@ fi
 fetch() { # url accept [outfile]
   local cfg="header = \"Accept: $2\"
 header = \"X-GitHub-Api-Version: 2022-11-28\"
-user-agent = \"tq-publisher-install\""
+user-agent = \"tq-edge-install\""
   [ -n "$TOKEN" ] && cfg="$cfg
 header = \"Authorization: Bearer $TOKEN\""
   if [ $# -ge 3 ]; then
@@ -152,8 +152,8 @@ if [ -z "$FILE" ]; then
       sort -t. -k1,1n -k2,2n -k3,3n | tail -n1 || true)
     [ -n "$VERSION" ] || die "no $TAG_PREFIX* release in $REPO"
   fi
-  NAME="tq-publisher-$VERSION-$PLATFORM.tar.gz"
-  say "tq-publisher $VERSION ($PLATFORM) from $REPO"
+  NAME="tq-edge-$VERSION-$PLATFORM.tar.gz"
+  say "tq-edge $VERSION ($PLATFORM) from $REPO"
   RELEASE=$(api "repos/$REPO/releases/tags/$TAG_PREFIX$VERSION" "no release $TAG_PREFIX$VERSION in $REPO, or no access")
   URL=$(asset_url "$RELEASE" "$NAME")
   SUMS_URL=$(asset_url "$RELEASE" SHA256SUMS)
@@ -174,15 +174,15 @@ fi
 # --- install ------------------------------------------------------------------
 
 tar -xzf "$FILE" -C "$WORK"
-SRC=$(find "$WORK" -mindepth 1 -maxdepth 1 -type d -name 'tq-publisher-*' | head -n1)
-[ -n "$SRC" ] && [ -x "$SRC/tq-publisher" ] || die "$FILE is not a tq-publisher tarball"
+SRC=$(find "$WORK" -mindepth 1 -maxdepth 1 -type d -name 'tq-edge-*' | head -n1)
+[ -n "$SRC" ] && [ -x "$SRC/tq-edge" ] || die "$FILE is not a tq-edge tarball"
 case "$(basename "$SRC")" in
   *"-$PLATFORM") ;;
   *) die "$(basename "$FILE") is not for $PLATFORM" ;;
 esac
 
 $SUDO mkdir -p "$PREFIX/bin"
-$SUDO cp "$SRC/tq-publisher" "$BIN.new"
+$SUDO cp "$SRC/tq-edge" "$BIN.new"
 $SUDO chmod 0755 "$BIN.new"
 $SUDO mv -f "$BIN.new" "$BIN"
 say "installed $("$BIN" --version)"
@@ -198,44 +198,44 @@ fi
 
 FRESH=0
 $SUDO mkdir -p "$CONFIG_DIR"
-if [ ! -f "$CONFIG_DIR/publisher.json" ]; then
-  $SUDO cp "$SRC/publisher.example.json" "$CONFIG_DIR/publisher.json"
+if [ ! -f "$CONFIG_DIR/edge.json" ]; then
+  $SUDO cp "$SRC/edge.example.json" "$CONFIG_DIR/edge.json"
   FRESH=1
 fi
-if [ ! -f "$CONFIG_DIR/publisher.env" ]; then
-  printf '# Secrets and settings for tq-publisher (KEY=value).\nTQ_SHARED_SECRET=\n#RUST_LOG=info,quinn=warn\n' |
-    $SUDO tee "$CONFIG_DIR/publisher.env" >/dev/null
+if [ ! -f "$CONFIG_DIR/edge.env" ]; then
+  printf '# Secrets and settings for tq-edge (KEY=value).\nTQ_SHARED_SECRET=\n#RUST_LOG=info,quinn=warn\n' |
+    $SUDO tee "$CONFIG_DIR/edge.env" >/dev/null
 fi
 $SUDO chmod 0750 "$CONFIG_DIR"
-$SUDO chmod 0640 "$CONFIG_DIR/publisher.json" "$CONFIG_DIR/publisher.env"
+$SUDO chmod 0640 "$CONFIG_DIR/edge.json" "$CONFIG_DIR/edge.env"
 if [ -n "$GROUP" ]; then
-  $SUDO chgrp "$GROUP" "$CONFIG_DIR" "$CONFIG_DIR/publisher.json" "$CONFIG_DIR/publisher.env"
+  $SUDO chgrp "$GROUP" "$CONFIG_DIR" "$CONFIG_DIR/edge.json" "$CONFIG_DIR/edge.env"
 fi
 
 if [ $SERVICE = 1 ] && systemd; then
-  sed -e "s#/usr/bin/tq-publisher#$BIN#" -e "s#/etc/tq/#$CONFIG_DIR/#g" "$SRC/tq-publisher.service" |
+  sed -e "s#/usr/bin/tq-edge#$BIN#" -e "s#/etc/tq/#$CONFIG_DIR/#g" "$SRC/tq-edge.service" |
     $SUDO tee $UNIT >/dev/null
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable tq-publisher >/dev/null 2>&1
+  $SUDO systemctl enable tq-edge >/dev/null 2>&1
   if [ $FRESH = 1 ]; then
-    say "edit $CONFIG_DIR/publisher.json and $CONFIG_DIR/publisher.env, then: sudo systemctl start tq-publisher"
+    say "edit $CONFIG_DIR/edge.json and $CONFIG_DIR/edge.env, then: sudo systemctl start tq-edge"
   else
-    $SUDO systemctl restart tq-publisher
-    say "restarted tq-publisher (journalctl -u tq-publisher -f)"
+    $SUDO systemctl restart tq-edge
+    say "restarted tq-edge (journalctl -u tq-edge -f)"
   fi
 elif [ $SERVICE = 1 ] && [ "$OS" = Darwin ]; then
-  sed -e "s#/usr/local/bin/tq-publisher#$BIN#" -e "s#/etc/tq/#$CONFIG_DIR/#g" "$SRC/dev.tq.publisher.plist" |
+  sed -e "s#/usr/local/bin/tq-edge#$BIN#" -e "s#/etc/tq/#$CONFIG_DIR/#g" "$SRC/dev.tq.edge.plist" |
     $SUDO tee $PLIST >/dev/null
   $SUDO chmod 0644 $PLIST
   if [ $FRESH = 1 ]; then
-    say "edit $CONFIG_DIR/publisher.json and $CONFIG_DIR/publisher.env, then: sudo launchctl bootstrap system $PLIST"
+    say "edit $CONFIG_DIR/edge.json and $CONFIG_DIR/edge.env, then: sudo launchctl bootstrap system $PLIST"
   else
-    $SUDO launchctl bootout system/dev.tq.publisher 2>/dev/null || true
+    $SUDO launchctl bootout system/dev.tq.edge 2>/dev/null || true
     $SUDO launchctl bootstrap system $PLIST
-    say "restarted tq-publisher (log: /var/log/tq-publisher.log)"
+    say "restarted tq-edge (log: /var/log/tq-edge.log)"
   fi
 elif [ $SERVICE = 1 ]; then
-  say "no systemd here: run $BIN --config $CONFIG_DIR/publisher.json yourself"
+  say "no systemd here: run $BIN --config $CONFIG_DIR/edge.json yourself"
 elif [ $FRESH = 1 ]; then
-  say "edit $CONFIG_DIR/publisher.json and $CONFIG_DIR/publisher.env"
+  say "edit $CONFIG_DIR/edge.json and $CONFIG_DIR/edge.env"
 fi

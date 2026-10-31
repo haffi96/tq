@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Packages one tq-publisher binary: a tarball for every platform (used by
+# Packages one tq-edge binary: a tarball for every platform (used by
 # install.sh) and, for Linux, a .deb. One compile, two distributions.
 #
-#   packaging/publisher/package.sh <version> <platform> <binary> <outdir>
+#   packaging/edge/package.sh <version> <platform> <binary> <outdir>
 #   platform: linux-x86_64 | linux-aarch64 | macos-aarch64
 #
 # Needs dpkg-deb for the .deb (Ubuntu: dpkg; macOS: brew install dpkg).
@@ -30,12 +30,12 @@ trap 'rm -rf "$WORK"' EXIT
 
 # --- tarball ------------------------------------------------------------------
 
-NAME="tq-publisher-$VERSION-$PLATFORM"
+NAME="tq-edge-$VERSION-$PLATFORM"
 mkdir "$WORK/$NAME"
-cp "$BINARY" "$WORK/$NAME/tq-publisher"
-chmod 0755 "$WORK/$NAME/tq-publisher"
-cp "$ROOT/config/publisher.example.json" "$HERE/install.sh" "$HERE/tq-publisher.service" \
-  "$HERE/dev.tq.publisher.plist" "$WORK/$NAME/"
+cp "$BINARY" "$WORK/$NAME/tq-edge"
+chmod 0755 "$WORK/$NAME/tq-edge"
+cp "$ROOT/config/edge.example.json" "$HERE/install.sh" "$HERE/tq-edge.service" \
+  "$HERE/dev.tq.edge.plist" "$WORK/$NAME/"
 # No macOS extended attributes: GNU tar warns about each one.
 COPYFILE_DISABLE=1 tar --no-xattrs -C "$WORK" -czf "$OUT/$NAME.tar.gz" "$NAME"
 echo "$OUT/$NAME.tar.gz"
@@ -44,15 +44,15 @@ echo "$OUT/$NAME.tar.gz"
 
 [ -n "$DEB_ARCH" ] || exit 0
 DEB="$WORK/deb"
-mkdir -p "$DEB/DEBIAN" "$DEB/usr/bin" "$DEB/lib/systemd/system" "$DEB/usr/share/tq-publisher"
-cp "$BINARY" "$DEB/usr/bin/tq-publisher"
-chmod 0755 "$DEB/usr/bin/tq-publisher"
-cp "$HERE/tq-publisher.service" "$DEB/lib/systemd/system/"
-cp "$ROOT/config/publisher.example.json" "$DEB/usr/share/tq-publisher/"
-chmod 0644 "$DEB/lib/systemd/system/tq-publisher.service" "$DEB/usr/share/tq-publisher/publisher.example.json"
+mkdir -p "$DEB/DEBIAN" "$DEB/usr/bin" "$DEB/lib/systemd/system" "$DEB/usr/share/tq-edge"
+cp "$BINARY" "$DEB/usr/bin/tq-edge"
+chmod 0755 "$DEB/usr/bin/tq-edge"
+cp "$HERE/tq-edge.service" "$DEB/lib/systemd/system/"
+cp "$ROOT/config/edge.example.json" "$DEB/usr/share/tq-edge/"
+chmod 0644 "$DEB/lib/systemd/system/tq-edge.service" "$DEB/usr/share/tq-edge/edge.example.json"
 
 cat >"$DEB/DEBIAN/control" <<EOF
-Package: tq-publisher
+Package: tq-edge
 Version: $VERSION
 Architecture: $DEB_ARCH
 Maintainer: haffi96 <haffi96@users.noreply.github.com>
@@ -60,10 +60,10 @@ Depends: libc6 (>= 2.31), passwd
 Section: net
 Priority: optional
 Homepage: https://github.com/haffi96/tq
-Description: tq publisher: camera uplink and teleop over QUIC
+Description: tq edge agent: publishes a device's cameras, data and channels over QUIC, with teleop
  Reads pre-encoded H.264/H.265 camera streams over TCP and sends them to a
  tq relay over WebTransport, one stream per GOP. Applies operator teleop
- commands behind a dead-man switch. Runs as the tq-publisher systemd service.
+ commands behind a dead-man switch. Runs as the tq-edge systemd service.
 EOF
 
 # The config is not a conffile: postinst seeds /etc/tq from the example
@@ -77,23 +77,23 @@ if [ "$1" = configure ]; then
   fi
   mkdir -p /etc/tq
   fresh=0
-  if [ ! -f /etc/tq/publisher.json ]; then
-    cp /usr/share/tq-publisher/publisher.example.json /etc/tq/publisher.json
+  if [ ! -f /etc/tq/edge.json ]; then
+    cp /usr/share/tq-edge/edge.example.json /etc/tq/edge.json
     fresh=1
   fi
-  if [ ! -f /etc/tq/publisher.env ]; then
-    printf '# Secrets and settings for tq-publisher (KEY=value).\nTQ_SHARED_SECRET=\n#RUST_LOG=info,quinn=warn\n' >/etc/tq/publisher.env
+  if [ ! -f /etc/tq/edge.env ]; then
+    printf '# Secrets and settings for tq-edge (KEY=value).\nTQ_SHARED_SECRET=\n#RUST_LOG=info,quinn=warn\n' >/etc/tq/edge.env
   fi
-  chgrp tq /etc/tq /etc/tq/publisher.json /etc/tq/publisher.env
+  chgrp tq /etc/tq /etc/tq/edge.json /etc/tq/edge.env
   chmod 0750 /etc/tq
-  chmod 0640 /etc/tq/publisher.json /etc/tq/publisher.env
+  chmod 0640 /etc/tq/edge.json /etc/tq/edge.env
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    systemctl enable tq-publisher >/dev/null 2>&1 || true
+    systemctl enable tq-edge >/dev/null 2>&1 || true
     if [ $fresh = 1 ]; then
-      echo "tq-publisher: edit /etc/tq/publisher.json and /etc/tq/publisher.env, then: systemctl start tq-publisher"
+      echo "tq-edge: edit /etc/tq/edge.json and /etc/tq/edge.env, then: systemctl start tq-edge"
     else
-      systemctl try-restart tq-publisher || true
+      systemctl try-restart tq-edge || true
     fi
   fi
 fi
@@ -103,7 +103,7 @@ cat >"$DEB/DEBIAN/prerm" <<'EOF'
 #!/bin/sh
 set -e
 if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
-  systemctl disable --now tq-publisher >/dev/null 2>&1 || true
+  systemctl disable --now tq-edge >/dev/null 2>&1 || true
 fi
 EOF
 
@@ -121,6 +121,6 @@ EOF
 chmod 0755 "$DEB/DEBIAN/postinst" "$DEB/DEBIAN/prerm" "$DEB/DEBIAN/postrm"
 
 # xz, not zstd: dpkg before 1.21.18 (Ubuntu 20.04, JetPack 5) cannot read zstd.
-DEB_FILE="$OUT/tq-publisher_${VERSION}_$DEB_ARCH.deb"
+DEB_FILE="$OUT/tq-edge_${VERSION}_$DEB_ARCH.deb"
 dpkg-deb --root-owner-group -Zxz --build "$DEB" "$DEB_FILE" >/dev/null
 echo "$DEB_FILE"

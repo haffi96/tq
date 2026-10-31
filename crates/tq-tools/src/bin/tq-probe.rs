@@ -46,6 +46,10 @@ struct Args {
     /// Print one summary line as JSON at the end.
     #[arg(long)]
     json: bool,
+    /// Send one JSON message on a channel once it is in the room, and log
+    /// its ack: `--send rover/lights='{"on":true}'`. Repeatable.
+    #[arg(long, value_name = "BROADCAST/CHANNEL=JSON")]
+    send: Vec<String>,
     /// Claim this protocol (`MAJOR.MINOR`) in the hello, to test the
     /// relay's version checks.
     #[arg(long, hide = true)]
@@ -148,6 +152,12 @@ async fn main() -> anyhow::Result<()> {
     }
     // Every track, as it appears.
     tokio::spawn(subscribe_all(session.clone(), args.broadcast.clone(), shared.clone()));
+    for s in &args.send {
+        let (channel, body) = s.split_once('=').context("--send BROADCAST/CHANNEL=JSON")?;
+        let channel: Path = channel.parse().map_err(|e| anyhow::anyhow!("--send {channel}: {e}"))?;
+        let body: serde_json::Value = serde_json::from_str(body).context("--send: the message is not JSON")?;
+        tokio::spawn(send_once(session.clone(), channel, body));
+    }
     if args.teleop_hz > 0.0 {
         tokio::spawn(teleop(session.clone(), args.broadcast.clone(), args.teleop_hz, shared.clone()));
     }
@@ -271,6 +281,34 @@ async fn read_track(session: Session, path: Path, kind: TrackKind, shared: Arc<M
         }
     }
     Ok(())
+}
+
+/// Sends `body` on `channel` once the channel is in the room; logs the ack.
+async fn send_once(session: Session, channel: Path, body: serde_json::Value) {
+    let mut room = session.room();
+    let _ = room
+        .wait_for(|r| r.broadcast(&channel.broadcast).is_some_and(|b| b.channel(&channel.name).is_some()))
+        .await;
+    let mut replies = session.replies();
+    let seq = match session.channel(channel.clone()).send_json(&body) {
+        Ok(seq) => seq,
+        Err(e) => return tracing::warn!(%channel, error = format!("{e:#}"), "send failed"),
+    };
+    let ack = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(r) = replies.recv().await {
+            if let Reply::Ack { channel: c, seq: s, status, detail, .. } = r {
+                if c == channel && s == seq {
+                    return Some((status, detail));
+                }
+            }
+        }
+        None
+    })
+    .await;
+    match ack {
+        Ok(Some((status, detail))) => tracing::info!(%channel, ?status, %detail, "sent"),
+        _ => tracing::warn!(%channel, "sent, no ack"),
+    }
 }
 
 /// Claims each broadcast's drive lock and drives it.

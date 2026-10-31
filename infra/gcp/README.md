@@ -7,7 +7,7 @@ browser ── https://tq.haffi.dev ──────────────�
    │
    ├── https://tq-relay-1.haffi.dev/api/*  (TCP 443)  ┐
    └── WebTransport tq-relay-1.haffi.dev   (UDP 443)  ├► GCE VM: COS + docker, relay image
-robot ──── tq-publisher ── QUIC            (UDP 443)  ┘   Let's Encrypt cert (DNS-01, Cloudflare)
+robot ──── tq-edge ── QUIC            (UDP 443)  ┘   Let's Encrypt cert (DNS-01, Cloudflare)
 ```
 
 What Terraform creates:
@@ -91,16 +91,18 @@ cargo run -p tq-relay -- token --preset operator --room robot-01 --ttl-hours 12
 
 Then open `https://tq.haffi.dev/?room=robot-01&preset=operator&token=…`.
 
-Publisher config:
+tq-edge config (`relay` section):
 
 ```json
-"relay_url": "https://tq-relay-1.haffi.dev:443",
-"relay_trust": { "mode": "system_roots" },
-"shared_secret": "<terraform output -raw shared_secret>"
+"relay": {
+  "url": "https://tq-relay-1.haffi.dev:443",
+  "trust": { "mode": "system_roots" },
+  "shared_secret": "<terraform output -raw shared_secret>"
+}
 ```
 
 For a test feed from this machine, `dev/publish-gcp.sh` runs the two test
-sources (H.264 and H.265) and a publisher using `config/publisher.gcp.json`.
+sources (H.264 and H.265) and tq-edge using `config/edge.gcp.json`.
 It reads the secret from the Terraform state.
 
 tq-app (0.3.0 or newer) settings file:

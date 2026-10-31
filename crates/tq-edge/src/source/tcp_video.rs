@@ -1,57 +1,97 @@
-//! TCP camera source: encoder byte stream -> frames on the camera's video
-//! track. Anything that writes H.264/H.265 (Annex B or length-prefixed) to
-//! a TCP socket is a camera.
+//! TCP video source: an encoder's byte stream -> frames on a video track.
+//! Anything that writes H.264/H.265 (Annex B or length-prefixed) to a TCP
+//! socket is a camera.
 
 use std::{
-    sync::{atomic::AtomicU64, atomic::Ordering::Relaxed, Arc, Mutex},
+    sync::{atomic::Ordering::Relaxed, Arc},
     time::Duration,
 };
 
 use tokio::{io::AsyncReadExt, net::TcpStream};
 use tq::Publication;
-use tq_media::{AuAssembler, NalFramer, Packager};
+use tq_media::{AuAssembler, Codec, Framing, FramingMode, NalFramer, Packager};
 use tq_transport::track::Track;
 use tq_wire::{now_us, FrameHeader, MediaFrame, FLAG_CAPTURE_FROM_SEI, FLAG_KEY};
 
-use crate::config::CameraConfig;
-
-pub struct Camera {
-    pub config: CameraConfig,
-    /// The camera's video track in the publication.
-    pub track: Arc<Track>,
-    pub publication: Arc<Publication>,
-    pub frames: AtomicU64,
-    pub detected_codec: Mutex<Option<String>>,
-}
+use super::{SourceConfig, Stats};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
-/// Reads the camera's TCP stream forever, reconnecting when it drops.
-pub async fn run(camera: Arc<Camera>) {
-    let cfg = &camera.config;
+pub struct Options {
+    addr: String,
+    codec: Option<Codec>,
+    framing: FramingMode,
+    complete_on_vcl: bool,
+}
+
+impl Options {
+    pub fn from_config(c: &SourceConfig) -> anyhow::Result<Self> {
+        let SourceConfig::Tcp {
+            addr,
+            codec,
+            framing,
+            complete_on_vcl,
+        } = c;
+        let codec = match codec.as_deref().unwrap_or("auto") {
+            "auto" => None,
+            c => Some(c.parse().map_err(anyhow::Error::msg)?),
+        };
+        let framing = match framing.as_deref().unwrap_or("auto") {
+            "auto" => FramingMode::Auto,
+            "annexb" | "byte-stream" => FramingMode::Fixed(Framing::AnnexB),
+            "length_prefixed" | "avc" => FramingMode::Fixed(Framing::LengthPrefixed),
+            other => anyhow::bail!("unknown video framing '{other}' (auto, annexb, length_prefixed)"),
+        };
+        Ok(Self {
+            addr: addr.clone(),
+            codec,
+            framing,
+            complete_on_vcl: *complete_on_vcl,
+        })
+    }
+}
+
+struct Camera {
+    id: String,
+    opts: Options,
+    track: Arc<Track>,
+    publication: Arc<Publication>,
+    stats: Arc<Stats>,
+}
+
+/// Reads the encoder's TCP stream forever, reconnecting when it drops.
+pub async fn run(id: String, opts: Options, track: Arc<Track>, publication: Arc<Publication>, stats: Arc<Stats>) {
+    let camera = Camera {
+        id,
+        opts,
+        track,
+        publication,
+        stats,
+    };
+    let (camera, cfg) = (&camera, &camera.opts);
     let mut logged_down = false;
     // Group numbers only need to be distinct per source connection; the
     // track renumbers them.
     let mut group: u64 = 0;
     loop {
-        match TcpStream::connect(&cfg.source).await {
+        match TcpStream::connect(&cfg.addr).await {
             Ok(stream) => {
                 logged_down = false;
                 let _ = stream.set_nodelay(true);
-                tracing::info!(camera = %cfg.id, source = %cfg.source, "source connected");
-                let reason = if let Err(e) = read_stream(&camera, stream, &mut group).await {
-                    tracing::warn!(camera = %cfg.id, error = %e, "source error");
+                tracing::info!(track = %camera.id, source = %cfg.addr, "source connected");
+                let reason = if let Err(e) = read_stream(camera, stream, &mut group).await {
+                    tracing::warn!(track = %camera.id, error = %e, "source error");
                     format!("source error: {e}")
                 } else {
-                    tracing::warn!(camera = %cfg.id, "source closed");
+                    tracing::warn!(track = %camera.id, "source closed");
                     "source closed".to_string()
                 };
-                camera.publication.set_online(&cfg.id, false, &reason);
+                camera.publication.set_online(&camera.id, false, &reason);
                 camera.track.reset();
             }
             Err(e) => {
                 if !logged_down {
-                    tracing::warn!(camera = %cfg.id, source = %cfg.source, error = %e, "source unavailable, retrying every second");
+                    tracing::warn!(track = %camera.id, source = %cfg.addr, error = %e, "source unavailable, retrying every second");
                     logged_down = true;
                 }
             }
@@ -61,8 +101,8 @@ pub async fn run(camera: Arc<Camera>) {
 }
 
 async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) -> anyhow::Result<()> {
-    let cfg = &camera.config;
-    let mut framer = NalFramer::new(cfg.framing()?, cfg.codec()?);
+    let cfg = &camera.opts;
+    let mut framer = NalFramer::new(cfg.framing, cfg.codec);
     let mut pipeline: Option<(AuAssembler, Packager)> = None;
     let mut index: u32 = 0;
     let mut started = false;
@@ -85,8 +125,8 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
             Some(p) => p,
             None => {
                 let codec = framer.codec().expect("codec known once a NAL is out");
-                tracing::info!(camera = %cfg.id, %codec, framing = ?framer.framing().unwrap(), "stream detected");
-                *camera.detected_codec.lock().unwrap() = Some(codec.to_string());
+                tracing::info!(track = %camera.id, %codec, framing = ?framer.framing().unwrap(), "stream detected");
+                *camera.stats.codec.lock().unwrap() = Some(codec.to_string());
                 pipeline.insert((AuAssembler::new(codec, cfg.complete_on_vcl), Packager::new(codec)))
             }
         };
@@ -101,13 +141,13 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
                 *group += 1;
                 index = 0;
                 if codec_string.as_deref() != Some(&frame.codec_string) {
-                    tracing::info!(camera = %cfg.id, codec = %frame.codec_string, "codec string");
+                    tracing::info!(track = %camera.id, codec = %frame.codec_string, "codec string");
                     codec_string = Some(frame.codec_string.clone());
                 }
             }
             if !started {
                 started = true;
-                camera.publication.set_online(&cfg.id, true, "");
+                camera.publication.set_online(&camera.id, true, "");
             }
             let mut flags = if frame.key { FLAG_KEY } else { 0 };
             let capture_us = match frame.capture_us {
@@ -117,7 +157,7 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
                 }
                 None => publisher_us,
             };
-            camera.frames.fetch_add(1, Relaxed);
+            camera.stats.frames.fetch_add(1, Relaxed);
             let media = MediaFrame {
                 // The session stamps its own indices.
                 broadcast: 0,

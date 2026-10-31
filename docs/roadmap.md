@@ -95,7 +95,7 @@ apps, tq-probe). Teleop is the regression test.
   video. Device state and events are `.status` and `.events` tracks.
 - Clocks: `tq_wire::Offset` composes the per-hop offsets with their error
   bounds; `Session::owner_offset` gives any owner's clock.
-- Web, tq-app, tq-probe and tq-publisher speak 3.0.
+- Web, tq-app, tq-probe and tq-edge speak 3.0.
 - Checked: the grep above is empty; relay end-to-end tests cover
   publishing, subscribing, permissions, thinning, channels, locks, the
   watchdog, outages and takeover; teleop works end to end with the real
@@ -107,7 +107,7 @@ Done (the crate was pulled into Phase 1 so each client was ported once):
 - A `tq` crate: `Session` (subscribe, channels, locks, clocks) and
   `Publication` (a broadcast that outlives reconnects: tracks, an inbox for
   channel messages with latest-wins sequencing, lock holders, watchdogs).
-  tq-publisher, tq-probe and tq-app use it.
+  tq-edge, tq-probe and tq-app use it.
 - The gaps found porting tq-app:
   - `Client`: reconnects with backoff (longer after an incompatible
     relay), resubscribes (`Client::subscribe` readers survive reconnects,
@@ -120,14 +120,23 @@ Done (the crate was pulled into Phase 1 so each client was ported once):
     before the first ping.
   - `tq::discover`: `/api/info`, dev tokens, a `Token` (given, signed or
     dev) and `Options::discover`, over HTTP or HTTPS.
-  - tq-app runs on `Client`, `hold` and `discover`; tq-publisher on
+  - tq-app runs on `Client`, `hold` and `discover`; tq-edge on
     `Client`; tq-probe on `hold` and `hops`. Tests: `hold_heartbeats_*`,
     `client_resubscribes_and_republishes`, `discover_over_http`. Checked
     live, including a relay restart under both.
 
+- `tq-publisher` → `tq-edge`, a config-driven agent on the device: tracks
+  fed by sources, channels feeding sinks, teleop optional
+  (`config/edge*.json`, [install.md](install.md#the-config)). Sinks: `log`,
+  and `tcp`, which writes JSON lines to the device's own program and
+  refuses messages while that program is not connected. Teleop's sink
+  gets drive commands and safe-stops, and a safe-stop on every connect.
+  Packaging, release workflow and docs renamed with it. Checked live with
+  `config/edge.full.example.json` (a data source and both sinks from a
+  stand-in program, including refusing while it is gone) and the plain
+  example with both consoles.
+
 Still to do:
-- `tq-publisher` → `tq-edge`: a config-driven agent on the device (sources to
-  tracks, channels to sinks).
 - Goal: publishing a camera and a channel is about 10 lines of Rust.
 - TS client package taken out of `web/src/worker.ts` and `protocol.ts`.
 - Golden test vectors (encoded bytes and decoded values) in the repo, checked
@@ -189,16 +198,14 @@ path. Both apps render it.
 
 ### Phase 4: sources
 
-- A `Source` trait in `tq-edge`: open, then produce access units (video) or
-  messages (data) into a track. A registry maps `"type"` in the config to an
-  implementation:
+- Done with tq-edge: a source is a module in `crates/tq-edge/src/source/`
+  picked by `"type"` in the config. `tcp` feeds video tracks (encoder byte
+  streams) and data tracks (JSON lines or length-prefixed messages), so
+  any process that writes to a socket is a source with no Rust involved:
   ```json
   { "id": "front", "kind": "video", "source": { "type": "tcp", "addr": "127.0.0.1:5010" } }
   ```
-- Built in: `tcp` (today's), `rtsp` (IP cameras), and `stdin` or `unix`
-  sockets.
-- Plugins: any process that writes Annex B (or length-prefixed JSON for
-  data) to a socket is a source with no Rust involved. Rust sources live
+- To do: `rtsp` (IP cameras), `stdin` and `unix` sockets; Rust sources
   behind cargo features.
 - Later: a GStreamer sink element and a ROS 2 bridge (images to video
   tracks, topics to data tracks, channels to topics).

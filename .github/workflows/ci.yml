@@ -1,4 +1,4 @@
-# Checks: Rust (relay, publisher, libraries), the web app, and the
+# Checks: Rust (relay, tq-edge, libraries), the web app, and the
 # macOS app. Releases are separate workflows, one per component tag.
 name: ci
 

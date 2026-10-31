@@ -1,6 +1,6 @@
 [package]
 name = "tq-transport"
-description = "QUIC/WebTransport plumbing shared by the tq publisher and relay: endpoints, certificates, group streams, GOP cache"
+description = "QUIC/WebTransport plumbing shared by the tq SDK and relay: endpoints, certificates, group streams, GOP cache"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

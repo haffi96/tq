@@ -1,14 +1,14 @@
 //! tq-impair: a UDP proxy that makes a link behave like Starlink (or any
 //! other profile) without root: base delay, jitter, random and bursty loss,
 //! a bandwidth cap with a bounded queue, and the periodic satellite handover
-//! spikes. Put it between the publisher and the relay (or a browser and the
+//! spikes. Put it between tq-edge and the relay (or a browser and the
 //! relay):
 //!
 //! ```text
-//! tq-publisher --relay-url https://127.0.0.1:4444  ->  tq-impair :4444  ->  tq-relay :4443
+//! tq-edge --relay-url https://127.0.0.1:4444  ->  tq-impair :4444  ->  tq-relay :4443
 //! ```
 //!
-//! "up" is client -> upstream (the robot uplink when the publisher is the
+//! "up" is client -> upstream (the robot uplink when tq-edge is the
 //! client), "down" is upstream -> client.
 
 use std::{

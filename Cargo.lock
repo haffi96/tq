@@ -7170,16 +7170,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tq-media"
+name = "tq-edge"
 version = "0.1.0"
-dependencies = [
- "bytes",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "tq-publisher"
-version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7195,6 +7187,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "tq-media"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

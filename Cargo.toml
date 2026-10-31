@@ -6,7 +6,7 @@ default-members = [
     "crates/tq",
     "crates/tq-media",
     "crates/tq-wire",
-    "crates/tq-publisher",
+    "crates/tq-edge",
     "crates/tq-relay",
     "crates/tq-teleop",
     "crates/tq-tools",
@@ -14,7 +14,7 @@ default-members = [
 ]
 
 [workspace.package]
-# Libraries and tools. The released binaries (tq-relay, tq-publisher, tq-app)
+# Libraries and tools. The released binaries (tq-relay, tq-edge, tq-app)
 # carry their own versions.
 version = "0.1.0"
 edition = "2021"
