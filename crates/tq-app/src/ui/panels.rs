@@ -166,6 +166,18 @@ impl Render for Header {
                         })
                         .children(update)
                         .child(toggle(
+                            "toggle-edit",
+                            IconName::LayoutDashboard,
+                            m.editing,
+                            "Edit the layout",
+                            |m| {
+                                m.editing = !m.editing;
+                                if !m.editing {
+                                    m.selected = None;
+                                }
+                            },
+                        ))
+                        .child(toggle(
                             "toggle-bottom",
                             IconName::PanelBottom,
                             bottom,
@@ -582,7 +594,11 @@ impl Render for Status {
             .bg(t.status_bar)
             .border_t_1()
             .border_color(t.status_bar_border)
-            .child(left)
-            .child(right)
+            .gap_4()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            // Narrow windows clip the right side rather than overlap it.
+            .child(left.flex_shrink_0())
+            .child(right.min_w_0().overflow_hidden())
     }
 }

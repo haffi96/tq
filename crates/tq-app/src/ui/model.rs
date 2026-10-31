@@ -68,13 +68,18 @@ pub struct Model {
     owners_seen: HashMap<String, String>,
     pub updates: update::Settings,
     pub update: UpdateState,
-    /// What the board shows: the given layout, or the preset made from
-    /// the room.
+    /// What the board shows: the user's layout (given, or edited here), or
+    /// the preset made from the room.
     pub layout: Arc<Layout>,
-    /// Given (`--layout`): never replaced by the preset.
-    pub layout_given: bool,
-    /// Bumped when `layout` changes.
-    pub layout_version: u64,
+    /// `layout` is the user's: never replaced by the preset.
+    pub layout_saved: bool,
+    /// Where edits are saved; `None` without a settings directory (they
+    /// last until the app quits).
+    pub store: Option<layout::Store>,
+    /// The editor is open.
+    pub editing: bool,
+    /// The widget the editor shows.
+    pub selected: Option<String>,
     /// A session's permissions have let it write a room's stop channel.
     stop_permitted: bool,
     ticks: u64,
@@ -106,12 +111,19 @@ pub fn kind_of(perms: &Perms) -> &'static str {
 }
 
 impl Model {
-    pub fn new(shared: Arc<Shared>, updates: update::Settings, layout: Option<Layout>) -> Self {
-        let layout_given = layout.is_some();
+    pub fn new(
+        shared: Arc<Shared>,
+        updates: update::Settings,
+        layout: Option<Layout>,
+        store: Option<layout::Store>,
+    ) -> Self {
+        let layout_saved = layout.is_some();
         Self {
             layout: Arc::new(layout.unwrap_or_else(|| layout::preset(&RoomState::default(), false))),
-            layout_given,
-            layout_version: 0,
+            layout_saved,
+            store,
+            editing: false,
+            selected: None,
             stop_permitted: false,
             shared,
             conn: (ConnState::Connecting, None),
@@ -331,11 +343,10 @@ impl Model {
             Event::Room(state) => {
                 // Statuses of broadcasts that went away go with them.
                 self.statuses.retain(|b, _| state.broadcast(b).is_some());
-                if !self.layout_given {
+                if !self.layout_saved {
                     let preset = layout::preset(&state, self.operator());
                     if preset != *self.layout {
                         self.layout = Arc::new(preset);
-                        self.layout_version += 1;
                     }
                 }
                 if let Some(perms) = self.shared.perms() {
@@ -466,6 +477,82 @@ impl Model {
         let i = self.log.partition_point(|(t, _)| *t > at_us);
         self.log.insert(i, (at_us, line));
         self.log.truncate(LOG_LINES);
+    }
+
+    // --- layout editing -------------------------------------------------
+
+    /// Changes the layout and saves it: from now on it is the user's, and
+    /// the room no longer remakes it.
+    pub fn edit_layout(&mut self, f: impl FnOnce(&mut Layout), cx: &mut Context<Self>) {
+        let mut layout = (*self.layout).clone();
+        f(&mut layout);
+        self.set_layout(layout, cx);
+    }
+
+    pub fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|id| !layout.widgets.iter().any(|w| &w.id == id))
+        {
+            self.selected = None;
+        }
+        self.layout = Arc::new(layout);
+        self.layout_saved = true;
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save(&self.layout) {
+                self.push_log(format!("Layout not saved to {}: {e}", store.path.display()));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Back to the preset made from the room. The saved layout is
+    /// forgotten; a `--layout` file stays as it is, and is written again on
+    /// the next edit.
+    pub fn reset_layout(&mut self, cx: &mut Context<Self>) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.forget() {
+                self.push_log(format!("Saved layout not removed: {e}"));
+            }
+        }
+        self.layout_saved = false;
+        self.selected = None;
+        let room = self.state.clone().unwrap_or_default();
+        self.layout = Arc::new(layout::preset(&room, self.operator()));
+        cx.notify();
+    }
+
+    /// Takes a layout pasted as JSON, or says why not.
+    pub fn import_layout(&mut self, json: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let layout = Layout::parse(json).map_err(|e| e.join("\n"))?;
+        self.set_layout(layout, cx);
+        self.push_log("Layout imported".into());
+        Ok(())
+    }
+
+    /// Where the layout is, for the editor.
+    pub fn layout_place(&self) -> String {
+        match (&self.store, self.layout_saved) {
+            (_, false) => "preset (not saved)".into(),
+            (Some(s), true) => format!("saved to {}", s.path.display()),
+            (None, true) => "not saved (no settings directory)".into(),
+        }
+    }
+
+    pub fn set_editing(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.editing = on;
+        if !on {
+            self.selected = None;
+        }
+        cx.notify();
+    }
+
+    pub fn select(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        if self.selected != id {
+            self.selected = id;
+            cx.notify();
+        }
     }
 
     // --- teleop ---------------------------------------------------------

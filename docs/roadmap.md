@@ -42,10 +42,11 @@ and resolved, through its review of `0c49a27` (web layouts). CodeRabbit
 then paused automatic reviews on the PR (too many commits), so the tq-app
 commit `f2823f2` and the review fixes `3b02fea` have had no CodeRabbit
 review: comment `@coderabbitai review` (or `resume`) to get one.
+The tq-app layout editor is on branch `tq-app-editor`, stacked on
+`generalize-core` (its own PR); neither is merged.
 Phase 1 is done; Phase 2's Rust half is done, tq-edge and the "about 10
 lines" SDK goal included. Phase 3: both consoles render layouts
-([layout-1.md](layout-1.md)); the web console also edits them (see
-below). Start with [protocol-3.md](protocol-3.md) for the wire
+([layout-1.md](layout-1.md)) and edit them (see below). Start with [protocol-3.md](protocol-3.md) for the wire
 format, `crates/tq/src/lib.rs` for the SDK, `crates/tq-relay/src/tests.rs`
 for worked examples of every feature, and [install.md](install.md#the-config)
 for tq-edge's config.
@@ -71,8 +72,13 @@ for tq-edge's config.
   `crates/tq-app/src/layout.rs` (spec, preset, resolving; tests check the
   preset matches the web's) and `src/ui/board.rs` (widgets as cached
   views; the session subscribes to what they want, keeps data per track
-  and holds locks per lock). `--layout` or the settings file picks one;
-  `config/layout.example.json` is an example.
+  and holds locks per lock; in edit mode, overlays to drag, resize and
+  remove; one column under 700 px). `src/ui/editor.rs` is the editor
+  panel (catalog, bindings, props, warnings); `layout.rs` also has the
+  widget types (`DEFS`, checked against the web's), `settle`, `stacked`
+  and `Store` (where layouts are saved). `--layout` or the settings file
+  picks one, else the saved one; `config/layout.example.json` is an
+  example.
 - `dev/fake-device.ts`: stand-in device programs for
   `config/edge.full.example.json` (telemetry that follows the drive
   commands, the lights sink, the teleop sink); `dev/run-local.sh` starts
@@ -115,6 +121,19 @@ for tq-edge's config.
   `--perm 'write:*/stop'` gets STOP and its Space stop is acked, a plain
   viewer gets none.
 
+- tq-app's editor (branch `tq-app-editor`), live against
+  `CONFIG=config/edge.full.example.json dev/run-local.sh`: overlays over
+  every widget with both videos still playing underneath; dragging a plot
+  onto a pinned lock (it settles under it, the rest make room; the file
+  is rewritten); rebinding the plot's field from the fields seen and
+  clearing Min/Max (Apply saves `{"path": "battery_v"}`, bare ids kept);
+  Add (bound to the first video, the duplicate-video warning shows),
+  Remove; the preset edited, saved under the settings directory, loaded
+  again after a restart, and Reset removing the file; narrow stacking
+  (with a raised threshold); a non-number refused on Apply; `w` typed in
+  a field does not drive, Space in a field is still STOP (lock let go,
+  robot latched); tq-probe's regression check alongside.
+
 **Regression check** (needs `../streaming-tools` next to this repo, or
 `STREAMING_TOOLS=…`): run `dev/run-local.sh` (or
 `CONFIG=config/edge.full.example.json dev/run-local.sh` with programs on
@@ -145,10 +164,10 @@ replace. Keep all of this when touching the stop, the drive lock or
 console key handling.
 
 **Known gaps and notes:**
-- tq-app does not edit layouts, has no gamepad input, and does not
-  unsubscribe widgets scrolled out of view.
-- tq-app at narrow widths: 3-column widgets get cramped (the web console
-  stacks to one column under 700 px); the status bar text overlaps.
+- tq-app has no gamepad input, and does not unsubscribe widgets
+  scrolled out of view. Its editor's binding pickers are built when a
+  widget is selected: a track that appears later needs the widget
+  selected again.
 - Widgets on the same channel share its last ack line.
 - Web: Space is STOP even in the editor's text fields (paste text with
   spaces). Gamepad drive is in but untested with a real pad (the user
@@ -160,7 +179,11 @@ console key handling.
 - tq-app's "Held by" badges show a bare session id.
 - Relay replay of `.events` on subscribe is by design; both consoles now
   log those lines at the time they happened.
-- Testing tips: on this machine the T3 Code app probes every new local
+- Testing tips: tq-app's window cannot be resized from AppleScript or by
+  dragging its edge with CGEvent; to see narrow mode, build once with
+  `NARROW` in `ui/board.rs` raised. Run it with `HOME=/tmp/…` to test the
+  per-room layout store without touching the real settings directory.
+  On this machine the T3 Code app probes every new local
   listening port with an HTTP `GET /`. Raw TCP test servers must tolerate
   stray connections. Drive tq-app's GUI with osascript System Events
   keystrokes (CGEvent key events do not reach it; CGEvent clicks do: a
@@ -171,7 +194,7 @@ console key handling.
   `tq-relay --secret … token --preset viewer --perm 'write:*/stop'` mints
   tokens with extra permissions.
 
-**Next:** the editor in tq-app (and a narrow-width mode), layouts per
+**Next:** layouts per
 room on the relay so both consoles share them, a `map` widget. The TS client
 package, golden test vectors and a pyo3 example are lower priority and
 can come whenever.
@@ -310,7 +333,10 @@ path. Both apps render it.
   drawn once per frame, cost warnings and the page's own draw time, and
   every catalog v1 widget except `map`.
 - **Done in tq-app:** rendering layout 1 (every widget but `map`), the
-  same preset, `--layout`, subscriptions following the widgets.
+  same preset, `--layout`, subscriptions following the widgets, and the
+  editor (as the web's, in the dock; saved per room and preset in the
+  settings directory, or back to the `--layout` file), with one-column
+  stacking under 700 px.
 - **Order:** web first to settle the spec and the editor. Then tq-app renders
   the same spec with GPUI, keeping the rules that keep video fast (cached
   views, video surfaces redrawn on their own). After that, the editor comes

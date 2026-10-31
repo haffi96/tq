@@ -112,9 +112,19 @@ A bare id resolves against the widget's `bind.broadcast`, then the layout's
 ## Storage
 
 tq-app reads a layout from `--layout <file>` or the settings file's
-`layout`, and refuses a file with problems, listing them all. It does not
-edit layouts yet; one made in the web editor can be exported there and
-given to it. Without one, it shows the preset.
+`layout`, and refuses a file with problems, listing them all. Without one
+it uses the layout last edited in the app for the room and preset
+(`layouts/<room>.<preset>.json` next to the settings file), else the
+preset. Its editor (the title bar's layout button) works like the web's:
+add, remove, drag and resize (push-down, then float-up), bind from the
+catalog, props, pin, the same cost line and warnings. It sits in the dock
+where the sidebar is, and saves every change at once, back to where the
+layout came from (a `--layout` file is rewritten). Reset to preset
+forgets the saved file (never a `--layout` one). Copy JSON and Paste JSON
+move layouts to and from the web console through the clipboard. Widgets
+keep working under the editor's overlays, so a binding can be tried while
+editing. Under 700 px of board width tq-app stacks widgets in one column,
+as the web console does, and they cannot be dragged there.
 
 The web console keeps the user's layout in `localStorage` under
 `tq.layout.<room>.<preset>`. Without one it makes a preset from the room

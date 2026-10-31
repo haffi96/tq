@@ -2,7 +2,10 @@
 //! path. The native counterpart of `web/src/layout.ts`: the same documents,
 //! the same presets, the same rules for resolving bare ids.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use tq_wire::{Path, RoomState, TrackKind};
@@ -55,6 +58,68 @@ pub struct Layout {
     pub broadcast: Option<String>,
     pub grid: Grid,
     pub widgets: Vec<Widget>,
+}
+
+/// Where the board's layout is kept: the `--layout` file, which edits are
+/// saved back to, or one file per room and preset in the settings
+/// directory.
+#[derive(Debug, Clone)]
+pub struct Store {
+    pub path: PathBuf,
+    /// The user's own file (`--layout`), never removed.
+    pub given: bool,
+}
+
+impl Store {
+    /// The settings directory's file for a room and preset.
+    pub fn for_room(dir: PathBuf, room: &str, preset: &str) -> Self {
+        let safe = |s: &str| -> String {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || "-_".contains(c) {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        };
+        Self {
+            path: dir.join(format!("{}.{}.json", safe(room), safe(preset))),
+            given: false,
+        }
+    }
+
+    /// The stored layout; `None` when there is no file yet.
+    pub fn load(&self) -> Result<Option<Layout>, String> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(json) => Layout::parse(&json).map(Some).map_err(|e| e.join("; ")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.given => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Writes the layout whole (a temporary file renamed over the old one).
+    pub fn save(&self, layout: &Layout) -> std::io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_string_pretty(layout)? + "\n";
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.path)
+    }
+
+    /// Forgets the stored layout; the user's own file stays.
+    pub fn forget(&self) -> std::io::Result<()> {
+        if self.given {
+            return Ok(());
+        }
+        match std::fs::remove_file(&self.path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Which binding of a widget.
@@ -121,11 +186,6 @@ impl Layout {
         }
     }
 
-    /// Rows the widgets take.
-    pub fn rows(&self) -> u32 {
-        self.widgets.iter().map(|w| w.at[1] + w.at[3]).max().unwrap_or(0)
-    }
-
     /// The first free spot for a widget `w` cells wide and `h` high.
     pub fn free_spot(&self, w: u32, h: u32) -> [u32; 4] {
         let cols = self.grid.cols;
@@ -182,6 +242,364 @@ impl Layout {
 
 fn overlaps(a: [u32; 4], b: [u32; 4]) -> bool {
     a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+/// Moves widgets down until none overlap, `first` keeping its place (the
+/// one just dropped or resized), then floats everything up as far as it
+/// goes, top first. Pinned widgets never move. As `settle` in
+/// web/src/layout.ts.
+pub fn settle(widgets: &mut [Widget], first: Option<&str>) {
+    let rank = |w: &Widget| {
+        if w.pinned {
+            0
+        } else if Some(w.id.as_str()) == first {
+            1
+        } else {
+            2
+        }
+    };
+    let mut order: Vec<usize> = (0..widgets.len()).collect();
+    order.sort_by_key(|&i| (rank(&widgets[i]), widgets[i].at[1], widgets[i].at[0]));
+    let mut placed: Vec<[u32; 4]> = Vec::new();
+    for i in order {
+        if !widgets[i].pinned {
+            while let Some(hit) = placed.iter().find(|p| overlaps(**p, widgets[i].at)) {
+                widgets[i].at[1] = hit[1] + hit[3];
+            }
+        }
+        placed.push(widgets[i].at);
+    }
+    let mut done: Vec<[u32; 4]> = widgets.iter().filter(|w| w.pinned).map(|w| w.at).collect();
+    let mut free: Vec<usize> = (0..widgets.len()).filter(|&i| !widgets[i].pinned).collect();
+    free.sort_by_key(|&i| (widgets[i].at[1], widgets[i].at[0]));
+    for i in free {
+        let at = &mut widgets[i].at;
+        while at[1] > 0 && !done.iter().any(|p| overlaps(*p, [at[0], at[1] - 1, at[2], at[3]])) {
+            at[1] -= 1;
+        }
+        done.push(*at);
+    }
+}
+
+/// Where widgets go on a narrow board: one column, in layout order, each
+/// as high as it is in the layout (as the web console does under 700 px).
+pub fn stacked(widgets: &[Widget], cols: u32) -> Vec<[u32; 4]> {
+    let mut y = 0;
+    widgets
+        .iter()
+        .map(|w| {
+            let at = [0, y, cols, w.at[3]];
+            y += w.at[3];
+            at
+        })
+        .collect()
+}
+
+// --- widget types ---------------------------------------------------------
+
+/// What a widget can be bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindKind {
+    Video,
+    Data,
+    /// A field of the bound data track's messages.
+    Field,
+    Channel,
+    Lock,
+    Broadcast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PropKind {
+    Number,
+    Text,
+    Json,
+    Select(&'static [&'static str]),
+}
+
+/// A setting in a widget's `props`. `default` is JSON.
+pub struct Prop {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub kind: PropKind,
+    pub default: Option<&'static str>,
+    pub help: &'static str,
+}
+
+/// A widget type, as the editor offers it. The same table as `DEFS` in
+/// web/src/widgets.ts (a test checks the types, labels and sizes).
+pub struct Def {
+    pub kind: &'static str,
+    pub label: &'static str,
+    /// Size a new one gets, in cells.
+    pub size: (u32, u32),
+    pub binds: &'static [BindKind],
+    /// Bindings that may be left empty.
+    pub optional: &'static [BindKind],
+    pub props: &'static [Prop],
+    /// Decodes video.
+    pub decode: bool,
+    pub redraw: &'static str,
+    /// Sends messages or takes locks.
+    pub writes: bool,
+}
+
+const fn prop(key: &'static str, label: &'static str, kind: PropKind) -> Prop {
+    Prop {
+        key,
+        label,
+        kind,
+        default: None,
+        help: "",
+    }
+}
+
+const fn num(key: &'static str, label: &'static str, default: &'static str, help: &'static str) -> Prop {
+    Prop {
+        key,
+        label,
+        kind: PropKind::Number,
+        default: Some(default),
+        help,
+    }
+}
+
+const LABEL: Prop = prop("label", "Label", PropKind::Text);
+
+use BindKind as B;
+
+pub const DEFS: &[Def] = &[
+    Def {
+        kind: "video",
+        label: "Video",
+        size: (6, 9),
+        binds: &[B::Video],
+        optional: &[],
+        props: &[Prop {
+            key: "hud",
+            label: "Latency HUD",
+            kind: PropKind::Select(&["full", "compact", "off"]),
+            default: Some("\"full\""),
+            help: "",
+        }],
+        decode: true,
+        redraw: "every frame, as its own view",
+        writes: false,
+    },
+    Def {
+        kind: "latency",
+        label: "Latency per hop",
+        size: (3, 4),
+        binds: &[B::Video],
+        optional: &[],
+        props: &[num("scale_ms", "Full scale (ms)", "100", "")],
+        decode: false,
+        redraw: "2 Hz",
+        writes: false,
+    },
+    Def {
+        kind: "number",
+        label: "Number",
+        size: (2, 2),
+        binds: &[B::Data, B::Field],
+        optional: &[],
+        props: &[
+            LABEL,
+            Prop {
+                help: "Default: the track's meta.units",
+                ..prop("unit", "Unit", PropKind::Text)
+            },
+            num("digits", "Decimals", "2", ""),
+            num(
+                "max_rate_hz",
+                "Max rate (Hz)",
+                "30",
+                "The relay thins the track to this; 0 = every message",
+            ),
+        ],
+        decode: false,
+        redraw: "on change, at most once per frame",
+        writes: false,
+    },
+    Def {
+        kind: "plot",
+        label: "Plot",
+        size: (4, 4),
+        binds: &[B::Data, B::Field],
+        optional: &[],
+        props: &[
+            LABEL,
+            num("window_s", "Window (s)", "10", ""),
+            prop("min", "Min (empty = auto)", PropKind::Number),
+            prop("max", "Max (empty = auto)", PropKind::Number),
+            num("max_rate_hz", "Max rate (Hz)", "0", "0 = every sample"),
+        ],
+        decode: false,
+        redraw: "once per display frame while data arrives",
+        writes: false,
+    },
+    Def {
+        kind: "values",
+        label: "Values",
+        size: (3, 4),
+        binds: &[B::Data],
+        optional: &[],
+        props: &[num("max_rate_hz", "Max rate (Hz)", "10", "0 = every message")],
+        decode: false,
+        redraw: "on change, at most once per frame",
+        writes: false,
+    },
+    Def {
+        kind: "button",
+        label: "Button",
+        size: (2, 2),
+        binds: &[B::Channel],
+        optional: &[],
+        props: &[
+            LABEL,
+            Prop {
+                default: Some("{}"),
+                ..prop("message", "Message (JSON)", PropKind::Json)
+            },
+        ],
+        decode: false,
+        redraw: "on click",
+        writes: true,
+    },
+    Def {
+        kind: "toggle",
+        label: "Toggle",
+        size: (2, 2),
+        binds: &[B::Channel],
+        optional: &[B::Data, B::Field],
+        props: &[
+            LABEL,
+            Prop {
+                help: "Default: the channel schema's one bool field, else `on`",
+                ..prop("field", "Field", PropKind::Text)
+            },
+        ],
+        decode: false,
+        redraw: "on change",
+        writes: true,
+    },
+    Def {
+        kind: "slider",
+        label: "Slider",
+        size: (3, 2),
+        binds: &[B::Channel],
+        optional: &[],
+        props: &[
+            LABEL,
+            Prop {
+                help: "Default: the channel schema's one number field, else `value`",
+                ..prop("field", "Field", PropKind::Text)
+            },
+            num("min", "Min", "0", ""),
+            num("max", "Max", "1", ""),
+            num("step", "Step", "0.01", ""),
+            num("rate_hz", "Send rate while dragging (Hz)", "10", ""),
+        ],
+        decode: false,
+        redraw: "on input",
+        writes: true,
+    },
+    Def {
+        kind: "drive",
+        label: "Drive (keyboard / gamepad)",
+        size: (3, 4),
+        binds: &[B::Channel, B::Lock],
+        optional: &[],
+        props: &[
+            num("rate_hz", "Rate (Hz)", "20", ""),
+            Prop {
+                default: Some("\"both\""),
+                help: "tq-app has no gamepad input yet",
+                ..prop("input", "Input", PropKind::Select(&["both", "keyboard", "gamepad"]))
+            },
+            Prop {
+                default: Some("\"drive\""),
+                ..prop("command", "Command", PropKind::Text)
+            },
+        ],
+        decode: false,
+        redraw: "at its send rate",
+        writes: true,
+    },
+    Def {
+        kind: "lock",
+        label: "Lock control",
+        size: (3, 3),
+        binds: &[B::Lock],
+        optional: &[],
+        props: &[],
+        decode: false,
+        redraw: "on change",
+        writes: true,
+    },
+    Def {
+        kind: "status",
+        label: "Robot status",
+        size: (3, 4),
+        binds: &[B::Broadcast],
+        optional: &[],
+        props: &[],
+        decode: false,
+        redraw: "on change",
+        writes: false,
+    },
+    Def {
+        kind: "log",
+        label: "Event log",
+        size: (12, 4),
+        binds: &[],
+        optional: &[],
+        props: &[],
+        decode: false,
+        redraw: "on new lines",
+        writes: false,
+    },
+];
+
+pub fn def_of(kind: &str) -> Option<&'static Def> {
+    DEFS.iter().find(|d| d.kind == kind)
+}
+
+/// Leaves of a JSON value as dotted paths with their type (`number`,
+/// `bool`, `string`), at most 256, as the web catalog finds fields.
+pub fn leaves(v: &serde_json::Value, prefix: &str, out: &mut BTreeMap<String, &'static str>) {
+    if out.len() >= 256 {
+        return;
+    }
+    let kind = match v {
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Object(m) => {
+            for (k, x) in m {
+                leaves(x, &join(prefix, k), out);
+            }
+            return;
+        }
+        serde_json::Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                leaves(x, &join(prefix, &i.to_string()), out);
+            }
+            return;
+        }
+        serde_json::Value::Null => return,
+    };
+    if !prefix.is_empty() {
+        out.insert(prefix.to_string(), kind);
+    }
+}
+
+fn join(prefix: &str, k: &str) -> String {
+    if prefix.is_empty() {
+        k.to_string()
+    } else {
+        format!("{prefix}.{k}")
+    }
 }
 
 const DRIVE: &str = "drive";
@@ -411,6 +829,81 @@ mod tests {
         );
         let viewer = preset(&room(), false);
         assert!(viewer.widgets.iter().all(|w| w.kind != "drive" && w.kind != "lock"));
+    }
+
+    #[test]
+    fn settle_pushes_down_and_floats_up() {
+        let w = |id: &str, at: [u32; 4], pinned| Widget {
+            id: id.into(),
+            kind: "number".into(),
+            at,
+            bind: None,
+            props: BTreeMap::new(),
+            pinned,
+        };
+        // `b` dropped onto `a`: `a` goes under it; `c` floats up to row 0.
+        let mut ws = vec![
+            w("a", [0, 0, 4, 2], false),
+            w("b", [0, 1, 4, 2], false),
+            w("c", [4, 3, 2, 2], false),
+        ];
+        settle(&mut ws, Some("b"));
+        assert_eq!(ws[1].at, [0, 0, 4, 2]);
+        assert_eq!(ws[0].at, [0, 2, 4, 2]);
+        assert_eq!(ws[2].at, [4, 0, 2, 2]);
+        // A pinned widget stays, even when dropped on, and nothing floats
+        // up through it.
+        let mut ws = vec![w("p", [0, 2, 4, 2], true), w("x", [0, 3, 4, 2], false)];
+        settle(&mut ws, Some("x"));
+        assert_eq!(ws[0].at, [0, 2, 4, 2]);
+        assert_eq!(ws[1].at, [0, 4, 4, 2]);
+        let stack = stacked(&ws, 12);
+        assert_eq!(stack, [[0, 0, 12, 2], [0, 2, 12, 2]]);
+    }
+
+    #[test]
+    fn defs_match_the_web_console() {
+        let web = include_str!("../../../web/src/widgets.ts");
+        for d in DEFS {
+            let want = format!(
+                "type: '{}',\n  label: '{}',\n  size: [{}, {}],",
+                d.kind, d.label, d.size.0, d.size.1
+            );
+            assert!(web.contains(&want), "web/src/widgets.ts has no {want}");
+            for p in d.props {
+                assert!(web.contains(&format!("key: '{}'", p.key)), "{}.{}", d.kind, p.key);
+            }
+        }
+        let types = web.matches("\n  type: '").count();
+        assert_eq!(types, DEFS.len(), "a widget type on one side only");
+    }
+
+    #[test]
+    fn leaves_of_a_message() {
+        let v = serde_json::json!({ "a": 1.5, "b": { "on": true }, "c": [ "x" ], "n": null });
+        let mut out = BTreeMap::new();
+        leaves(&v, "", &mut out);
+        let got: Vec<_> = out.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        assert_eq!(got, [("a", "number"), ("b.on", "bool"), ("c.0", "string")]);
+    }
+
+    #[test]
+    fn store_round_trip() {
+        let dir = std::env::temp_dir().join(format!("tq-app-store-{}", std::process::id()));
+        let store = Store::for_room(dir.clone(), "robot/01", "operator");
+        assert!(store.path.ends_with("robot_01.operator.json"));
+        assert_eq!(store.load(), Ok(None));
+        let l = Layout::parse(EXAMPLE).unwrap();
+        store.save(&l).unwrap();
+        assert_eq!(store.load(), Ok(Some(l)));
+        store.forget().unwrap();
+        assert_eq!(store.load(), Ok(None));
+        let given = Store {
+            path: dir.join("missing.json"),
+            given: true,
+        };
+        assert!(given.load().is_err(), "a given file must exist");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

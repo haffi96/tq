@@ -9,7 +9,13 @@
 //! - everything else (room state, the 2 Hz stats), through the model.
 //!
 //! Columns share the width; rows are `row_height` high. Positions are
-//! fractions of the width, so the board needs no measuring.
+//! fractions of the width. The board measures its width only to stack the
+//! widgets in one column when it is narrow (under 700 px, as the web
+//! console does) and to turn a drag into cells.
+//!
+//! While editing, each widget gets an overlay of its own (drag bar, resize
+//! corner, select and remove) on top of its view: the views underneath are
+//! not touched, so video keeps drawing while widgets are moved.
 //!
 //! The board itself is not cached, and a video widget is not a view of its
 //! own: the board places the tile's [`Video`] and [`Hud`] views directly.
@@ -17,7 +23,9 @@
 //! so the path from the root to a picture stays uncached.
 
 use std::{
+    cell::Cell,
     collections::HashMap,
+    rc::Rc,
     sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
@@ -34,11 +42,13 @@ use gpui_kit::{
     },
     div, point,
     prelude::*,
-    px, relative, AnyView, App, Context, Entity, PathBuilder, SharedString, StyleRefinement, Window,
+    px, relative, AnyView, App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder,
+    Pixels, Point, SharedString, StyleRefinement, Window,
 };
 use tq_wire::{AckStatus, Path, Subscription, Verb};
 
 use super::{
+    editor,
     model::{time_of_day, Model},
     tile::{Hud, Video},
     widgets::*,
@@ -49,6 +59,8 @@ use crate::{
 };
 
 const GAP: f32 = 8.;
+/// Under this board width widgets stack in one column.
+const NARROW: f32 = 700.;
 
 /// A widget's bindings, resolved against the room.
 #[derive(Clone, Default, PartialEq)]
@@ -82,12 +94,38 @@ struct Slot {
     view: View,
 }
 
+/// Everything about a widget but where it is: moving one keeps its view
+/// (and its video) as it is.
+fn same_but_place(a: &Widget, b: &Widget) -> bool {
+    a.id == b.id && a.kind == b.kind && a.bind == b.bind && a.props == b.props && a.pinned == b.pinned
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DragMode {
+    Move,
+    Resize,
+}
+
+/// A widget being moved or resized: where the mouse went down, where the
+/// widget was, and where it would go now.
+struct Drag {
+    id: String,
+    mode: DragMode,
+    origin: Point<Pixels>,
+    start: [u32; 4],
+    at: [u32; 4],
+}
+
 pub struct Board {
     model: Entity<Model>,
     slots: Vec<Slot>,
     /// Data seq last seen per track, and ack seq.
     seen: HashMap<Path, u64>,
     acks_seen: u64,
+    /// The grid's bounds as last painted.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+    narrow: Rc<Cell<bool>>,
+    drag: Option<Drag>,
 }
 
 impl Board {
@@ -98,6 +136,9 @@ impl Board {
             slots: Vec::new(),
             seen: HashMap::new(),
             acks_seen: 0,
+            bounds: Default::default(),
+            narrow: Default::default(),
+            drag: None,
         };
         board.sync(cx);
         board
@@ -151,7 +192,7 @@ impl Board {
         for w in &layout.widgets {
             let bound = Bound::of(&layout, w, self.model.read(cx));
             let slot = match old.remove(&w.id) {
-                Some(s) if s.spec == *w && s.bound == bound => s,
+                Some(s) if same_but_place(&s.spec, w) && s.bound == bound => Slot { spec: w.clone(), ..s },
                 _ => {
                     let model = self.model.clone();
                     let (spec, b) = (w.clone(), bound.clone());
@@ -226,24 +267,229 @@ fn wants(slots: &[Slot]) -> Vec<Subscription> {
     subs
 }
 
+impl Board {
+    fn start_drag(&mut self, id: &str, mode: DragMode, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(s) = self.slots.iter().find(|s| s.spec.id == id) else {
+            return;
+        };
+        if s.spec.pinned || self.narrow.get() {
+            return;
+        }
+        self.drag = Some(Drag {
+            id: id.to_string(),
+            mode,
+            origin: e.position,
+            start: s.spec.at,
+            at: s.spec.at,
+        });
+        self.model.update(cx, |m, cx| m.select(Some(id.to_string()), cx));
+    }
+
+    fn on_drag_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(d) = &mut self.drag else { return };
+        let layout = &self.model.read(cx).layout;
+        let cols = layout.grid.cols as i64;
+        let cell_w = f32::from(self.bounds.get().size.width) / cols as f32;
+        let cell_h = layout.grid.row_height as f32 + GAP;
+        let dx = (f32::from(e.position.x - d.origin.x) / cell_w.max(1.)).round() as i64;
+        let dy = (f32::from(e.position.y - d.origin.y) / cell_h).round() as i64;
+        let [x, y, w, h] = d.start.map(i64::from);
+        let at = match d.mode {
+            DragMode::Move => [(x + dx).clamp(0, cols - w), (y + dy).max(0), w, h],
+            DragMode::Resize => [x, y, (w + dx).clamp(1, cols - x), (h + dy).max(1)],
+        }
+        .map(|v| v as u32);
+        if at != d.at {
+            d.at = at;
+            cx.notify();
+        }
+    }
+
+    /// Drops the widget being dragged: the others make room, and the
+    /// layout is saved.
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.drag.take() else { return };
+        cx.notify();
+        if d.at == d.start {
+            return;
+        }
+        self.model.update(cx, |m, cx| {
+            m.edit_layout(
+                |l| {
+                    if let Some(w) = l.widgets.iter_mut().find(|w| w.id == d.id) {
+                        w.at = d.at;
+                    }
+                    layout::settle(&mut l.widgets, Some(&d.id));
+                },
+                cx,
+            )
+        });
+    }
+
+    /// The editor's overlay over one widget.
+    fn overlay(&self, s: &Slot, warns: usize, selected: bool, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let theme = cx.theme();
+        let id = s.spec.id.clone();
+        let pinned = s.spec.pinned;
+        let movable = !pinned && !self.narrow.get();
+        let label = layout::def_of(&s.spec.kind).map_or(s.spec.kind.as_str(), |d| d.label);
+        let model = self.model.clone();
+        let select = {
+            let (model, id) = (model.clone(), id.clone());
+            move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                model.update(cx, |m, cx| m.select(Some(id.clone()), cx))
+            }
+        };
+        let bar = h_flex()
+            .id(SharedString::from(format!("bar:{id}")))
+            .h(px(26.))
+            .px_2()
+            .gap_1()
+            .items_center()
+            .bg(if selected { theme.primary } else { theme.secondary })
+            .text_color(if selected {
+                theme.primary_foreground
+            } else {
+                theme.secondary_foreground
+            })
+            .text_xs()
+            .font_semibold()
+            .when(movable, |b| b.cursor_move())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
+                    let id = id.clone();
+                    move |b, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        b.start_drag(&id, DragMode::Move, e, cx)
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(format!("{label} · {id}{}", if pinned { " · pinned" } else { "" })),
+            )
+            .when(warns > 0, |b| {
+                b.child(div().text_color(theme.warning).child(format!("⚠ {warns}")))
+            })
+            .when(!pinned, |b| {
+                let (model, id) = (model.clone(), id.clone());
+                b.child(
+                    Button::new(SharedString::from(format!("remove:{id}")))
+                        .xsmall()
+                        .ghost()
+                        .label("×")
+                        .tooltip("Remove")
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            model.update(cx, |m, cx| m.edit_layout(|l| l.widgets.retain(|w| w.id != id), cx))
+                        }),
+                )
+            });
+        div()
+            .id(SharedString::from(format!("edit:{id}")))
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .rounded(theme.radius_lg)
+            .border_2()
+            .border_color(if selected { theme.primary } else { theme.border })
+            .bg(theme.background.opacity(0.35))
+            .on_mouse_down(MouseButton::Left, select)
+            .child(bar)
+            .when(movable, |o| {
+                o.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .bottom_0()
+                        .size(px(16.))
+                        .cursor_nwse_resize()
+                        .rounded_tl_md()
+                        .bg(if selected {
+                            theme.primary
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |b, e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                b.start_drag(&id, DragMode::Resize, e, cx)
+                            }),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+}
+
 impl Render for Board {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = self.model.read(cx);
         let layout = m.layout.clone();
-        let theme = cx.theme();
+        let editing = m.editing;
+        let selected = m.selected.clone();
+        let warns = if editing {
+            editor::warnings(&layout, m)
+        } else {
+            HashMap::new()
+        };
         let (cols, row) = (layout.grid.cols as f32, layout.grid.row_height as f32);
-        let mut inner = div()
-            .relative()
-            .w_full()
-            .h(px(layout.rows() as f32 * (row + GAP) + GAP));
+        let narrow = self.narrow.get();
+        let places: Vec<[u32; 4]> = if narrow {
+            layout::stacked(&layout.widgets, layout.grid.cols)
+        } else {
+            layout.widgets.iter().map(|w| w.at).collect()
+        };
+        let place = |s: &Slot| {
+            match &self.drag {
+                Some(d) if d.id == s.spec.id => Some(d.at),
+                _ => layout.widgets.iter().position(|w| w.id == s.spec.id).map(|i| places[i]),
+            }
+            .unwrap_or(s.spec.at)
+        };
+        let rows = self.slots.iter().map(&place).map(|a| a[1] + a[3]).max().unwrap_or(0);
+        // A drag past the bottom grows the board, so there is room to drop.
+        let rows = rows + u32::from(self.drag.is_some()) * 4;
+        let (bounds, narrow_cell) = (self.bounds.clone(), self.narrow.clone());
+        let board = cx.entity().downgrade();
+        let mut inner = div().relative().w_full().h(px(rows as f32 * (row + GAP) + GAP)).child(
+            canvas(
+                move |b, _, cx| {
+                    bounds.set(b);
+                    let narrow = f32::from(b.size.width) < NARROW;
+                    if narrow != narrow_cell.get() {
+                        narrow_cell.set(narrow);
+                        let board = board.clone();
+                        cx.defer(move |cx| {
+                            let _ = board.update(cx, |_, cx| cx.notify());
+                        });
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
         for s in &self.slots {
-            let [x, y, w, h] = s.spec.at;
+            let [x, y, w, h] = place(s);
             let view = match &s.view {
                 View::Video(v) => v.read(cx).tile(cx),
                 View::Other(v) => AnyView::from(v.clone())
                     .cached(StyleRefinement::default().size_full())
                     .into_any_element(),
             };
+            let overlay = editing.then(|| {
+                let n = warns.get(&s.spec.id).map_or(0, Vec::len);
+                self.overlay(s, n, selected.as_ref() == Some(&s.spec.id), cx)
+            });
             inner = inner.child(
                 div()
                     .absolute()
@@ -252,15 +498,19 @@ impl Render for Board {
                     .top(px(y as f32 * (row + GAP) + GAP))
                     .h(px(h as f32 * (row + GAP) - GAP))
                     .px(px(GAP / 2.))
-                    .child(view),
+                    .child(div().relative().size_full().child(view).children(overlay)),
             );
         }
+        let theme = cx.theme();
         div()
             .id("board")
             .size_full()
             .overflow_y_scroll()
             .px(px(GAP / 2.))
             .bg(theme.background)
+            .on_mouse_move(cx.listener(Self::on_drag_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(|b, _, _, cx| b.end_drag(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|b, _, _, cx| b.end_drag(cx)))
             .child(inner)
     }
 }
