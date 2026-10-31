@@ -1,7 +1,7 @@
 //! What the panels show: connection and room state, the stats windows,
 //! the operator's keys and the event log. An entity of its own so the
-//! panels re-render when it changes (control messages, room events, key
-//! presses and the stats tick), never for a video frame.
+//! panels re-render when it changes (room states and events, key presses
+//! and the stats tick), never for a video frame.
 
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
@@ -10,12 +10,12 @@ use std::{
 
 use gpui_kit::Context;
 use tq_wire::{
-    BuildInfo, Compat, Control, Event as RoomEvent, OperatorChange, PublisherGone, Role, RoomMessage, RoomState,
+    BroadcastState, BuildInfo, Compat, Control, Event as RoomEvent, LockChange, Perms, RoomState, StopReason,
 };
 
 use crate::{
     feed::Stats,
-    session::{Command, ConnState, Drive, Event, Shared},
+    session::{self, ConnState, Drive, Event, Shared},
     stats::Window as Win,
     update,
 };
@@ -24,12 +24,22 @@ const LOG_LINES: usize = 200;
 /// Stats ticks kept for the sparklines: 60 s at 2 Hz.
 const HISTORY: usize = 120;
 
+/// Teleop's state as the robot reports it on its `.status` track.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RobotTeleop {
+    pub tripped: bool,
+    pub reason: String,
+    pub holder: Option<String>,
+}
+
 pub struct Model {
     pub shared: Arc<Shared>,
     pub conn: (ConnState, Option<String>),
+    /// This session's id, while connected.
     pub session: Option<String>,
-    pub state: Option<RoomState>,
+    pub state: Option<Arc<RoomState>>,
     pub link: Option<String>,
+    /// Per feed (by track path).
     pub stats: Vec<(String, Stats)>,
     /// Teleop ack and heartbeat round trips over the last stats interval.
     pub teleop_rtt: (Win, Win),
@@ -41,16 +51,18 @@ pub struct Model {
     pub sidebar: bool,
     pub bottom: bool,
     pub log: Vec<(String, String)>,
-    /// Per camera capture -> render, oldest first; `None` for a tick
+    /// Per feed capture -> render, oldest first; `None` for a tick
     /// without frames.
     pub history: HashMap<String, VecDeque<Option<f64>>>,
-    /// Publisher round trip, oldest first.
+    /// Round trip to the owner of the broadcast the link panel shows,
+    /// oldest first.
     pub rtt_history: VecDeque<Option<f64>>,
-    /// The relay's build from its welcome; `None` before 1.1 or before
-    /// connecting.
+    /// The relay's build from its welcome.
     pub relay_build: Option<BuildInfo>,
-    /// The last publisher build logged, to log changes once.
-    publisher_seen: Option<String>,
+    /// Each broadcast's newest `.status`.
+    pub statuses: HashMap<String, serde_json::Value>,
+    /// The last owner build logged per broadcast, to log changes once.
+    owners_seen: HashMap<String, String>,
     pub updates: update::Settings,
     pub update: UpdateState,
     ticks: u64,
@@ -64,6 +76,21 @@ pub enum UpdateState {
     Available(update::Release),
     Installing,
     Failed(String),
+}
+
+/// What a participant's permissions make it, for counts and the log.
+pub fn kind_of(perms: &Perms) -> &'static str {
+    if perms.can_publish() {
+        "robot"
+    } else if perms
+        .0
+        .iter()
+        .any(|p| p.starts_with("lock:") || p.starts_with("force:") || p.starts_with("write:"))
+    {
+        "operator"
+    } else {
+        "viewer"
+    }
 }
 
 impl Model {
@@ -85,43 +112,68 @@ impl Model {
             history: HashMap::new(),
             rtt_history: VecDeque::new(),
             relay_build: None,
-            publisher_seen: None,
+            statuses: HashMap::new(),
+            owners_seen: HashMap::new(),
             updates,
             update: UpdateState::Idle,
             ticks: 0,
         }
     }
 
-    /// This session holds the operator claim.
+    /// The broadcast the operator drives: the first with a `drive` lock.
+    pub fn drive_broadcast(&self) -> Option<&BroadcastState> {
+        session::drive_broadcast(self.state.as_deref()?)
+    }
+
+    /// The broadcast the link panel and title bar show: the driven one,
+    /// else the first.
+    pub fn main_broadcast(&self) -> Option<&BroadcastState> {
+        self.drive_broadcast()
+            .or_else(|| self.state.as_ref()?.broadcasts.first())
+    }
+
+    /// Session holding the drive lock.
+    pub fn drive_holder(&self) -> Option<&str> {
+        self.drive_broadcast()?.lock(session::DRIVE)?.holder.as_deref()
+    }
+
+    /// This session holds the drive lock.
     pub fn driving(&self) -> bool {
-        let holder = self.state.as_ref().and_then(|s| s.operator.as_ref());
-        holder.is_some() && holder == self.session.as_ref()
+        let holder = self.drive_holder();
+        holder.is_some() && holder == self.session.as_deref()
     }
 
-    pub fn publisher_build(&self) -> Option<&BuildInfo> {
-        self.state.as_ref()?.publisher.as_ref()?.build.as_ref()
+    /// Teleop's state on a broadcast, from its `.status`.
+    pub fn robot_teleop(&self, broadcast: &str) -> Option<RobotTeleop> {
+        let t = self.statuses.get(broadcast)?.get("teleop")?;
+        Some(RobotTeleop {
+            tripped: t.get("tripped")?.as_bool()?,
+            reason: t.get("reason").and_then(|r| r.as_str()).unwrap_or_default().to_string(),
+            holder: t.get("holder").and_then(|h| h.as_str()).map(str::to_string),
+        })
     }
 
-    /// Logs the publisher's build when it first shows up or changes.
-    fn note_publisher(&mut self) {
-        let Some(p) = self.state.as_ref().and_then(|s| s.publisher.as_ref()) else {
+    /// Logs each broadcast owner's build when it first shows up or changes.
+    fn note_owners(&mut self) {
+        let Some(state) = self.state.clone() else {
             return;
         };
-        let line = match &p.build {
-            Some(b) => format!("Publisher {} runs {}", p.publisher_id, b.long()),
-            None => format!("Publisher {} runs an unknown version (protocol 1.0)", p.publisher_id),
-        };
-        if self.publisher_seen.as_ref() == Some(&line) {
-            return;
-        }
-        self.publisher_seen = Some(line.clone());
-        let build = p.build.clone();
-        self.push_log(line);
-        if Compat::of_build(build.as_ref()) != Compat::Same {
-            self.push_log(format!(
-                "Warning: {}",
-                tq_wire::mismatch("publisher", build.as_ref(), "tq-app")
-            ));
+        for b in state.broadcasts.iter().filter(|b| b.owner.is_some()) {
+            let line = match &b.build {
+                Some(build) => format!("Broadcast {} runs {}", b.name, build.long()),
+                None => format!("Broadcast {} runs an unknown version", b.name),
+            };
+            if self.owners_seen.get(&b.name) == Some(&line) {
+                continue;
+            }
+            self.owners_seen.insert(b.name.clone(), line.clone());
+            self.push_log(line);
+            if Compat::of_build(b.build.as_ref()) != Compat::Same {
+                self.push_log(format!(
+                    "Warning: {}",
+                    tq_wire::mismatch(&format!("broadcast {}", b.name), b.build.as_ref(), "tq-app")
+                ));
+            }
         }
     }
 
@@ -196,22 +248,18 @@ impl Model {
     }
 
     pub fn operator(&self) -> bool {
-        self.shared.config.role == Role::Operator
+        self.shared.config.operator()
     }
 
     /// The stats tick: takes every window the panels and tiles show.
     pub fn tick(&mut self, frame_cost: Win, cx: &mut Context<Self>) {
-        self.stats = self
-            .shared
-            .feeds()
-            .iter()
-            .map(|f| (f.info.id.clone(), f.take_stats()))
-            .collect();
+        let feeds = self.shared.feeds();
+        self.stats = feeds.iter().map(|f| (f.path.to_string(), f.take_stats())).collect();
         self.frame_cost = frame_cost;
         self.ticks += 1;
         if self.shared.config.log_stats && self.ticks.is_multiple_of(4) {
-            let sync = self.shared.clock.lock().unwrap().sync_error_ms();
-            for (id, s) in &self.stats {
+            for (f, (id, s)) in feeds.iter().zip(&self.stats) {
+                let sync = self.shared.sync_error_ms(&f.path.broadcast);
                 tracing::info!("{id}: {}", super::tile::overlay_text(s, sync).replace('\n', " | "));
             }
             tracing::info!("ui frame cost ms avg/max {}", self.frame_cost);
@@ -223,11 +271,7 @@ impl Model {
             let h = self.history.entry(id.clone()).or_default();
             push(h, s.capture_to_render.avg);
         }
-        let rtt = self
-            .state
-            .as_ref()
-            .and_then(|s| s.publisher.as_ref())
-            .and_then(|p| p.rtt_ms);
+        let rtt = self.main_broadcast().and_then(|b| b.rtt_ms);
         push(&mut self.rtt_history, rtt);
         cx.notify();
     }
@@ -238,9 +282,10 @@ impl Model {
             Event::Frame => return,
             Event::Status(state, detail) => {
                 if state != ConnState::Connected {
-                    // The next session's events stream starts with a state.
+                    // The next session starts with a fresh state.
                     self.session = None;
                     self.state = None;
+                    self.statuses.clear();
                 }
                 if let (ConnState::Closed, Some(d)) = (state, &detail) {
                     self.push_log(format!("Disconnected: {d}"));
@@ -250,38 +295,42 @@ impl Model {
                 }
                 self.conn = (state, detail);
             }
-            Event::Room(RoomMessage::State { state, .. }) => {
-                self.state = Some(state);
-                self.note_publisher();
+            Event::Connected { session, relay } => {
+                self.session = Some(session);
+                self.push_log(format!("Relay runs {}", relay.long()));
+                if Compat::of_build(Some(&relay)) != Compat::Same {
+                    self.push_log(format!(
+                        "Warning: {}",
+                        tq_wire::mismatch("relay", Some(&relay), "tq-app")
+                    ));
+                }
+                self.relay_build = Some(relay);
             }
-            Event::Room(RoomMessage::Event(e)) => {
+            Event::Room(state) => {
+                // Statuses of broadcasts that went away go with them.
+                self.statuses.retain(|b, _| state.broadcast(b).is_some());
+                self.state = Some(state);
+                self.note_owners();
+            }
+            Event::RoomEvent(e) => {
                 if let Some(line) = self.describe(&e.event) {
                     self.push_log(line);
                 }
             }
-            Event::Room(RoomMessage::Unknown) => {}
-            Event::Control(msg) => match msg {
-                Control::Welcome { session, relay, .. } => {
-                    self.session = Some(session);
-                    self.push_log(match &relay {
-                        Some(b) => format!("Relay runs {}", b.long()),
-                        None => "Relay runs an unknown version (protocol 1.0)".into(),
-                    });
-                    if Compat::of_build(relay.as_ref()) != Compat::Same {
-                        self.push_log(format!(
-                            "Warning: {}",
-                            tq_wire::mismatch("relay", relay.as_ref(), "tq-app")
-                        ));
+            Event::BroadcastStatus(broadcast, status) => {
+                let before = self.robot_teleop(&broadcast);
+                self.statuses.insert(broadcast.clone(), status);
+                let after = self.robot_teleop(&broadcast);
+                match (before.map(|t| t.tripped), after) {
+                    (Some(false), Some(t)) if t.tripped => {
+                        self.push_log(format!("{broadcast} safe-stopped: {}", t.reason))
                     }
-                    self.relay_build = relay;
+                    (Some(true), Some(t)) if !t.tripped => self.push_log(format!("{broadcast} armed")),
+                    _ => {}
                 }
-                Control::ClaimResult { ok: false, reason, .. } => {
-                    self.push_log(format!("Claim refused: {}", reason.unwrap_or_default()))
-                }
-                // The relay answers a release with a result too.
-                Control::ClaimResult { ok: true, holder, .. } if holder.is_some() && holder == self.session => {
-                    self.push_log("Claim granted: you are driving".into())
-                }
+            }
+            Event::Log(line) => self.push_log(line),
+            Event::Control(msg) => match msg {
                 Control::LinkStats { quic } => {
                     self.link = Some(format!(
                         "downlink quic: rtt {:.1} ms  cwnd {} KiB  lost {}/{}",
@@ -319,36 +368,42 @@ impl Model {
     fn describe(&self, event: &RoomEvent) -> Option<String> {
         Some(match event {
             RoomEvent::ParticipantJoined { participant: p } if self.session.as_ref() != Some(&p.session) => {
-                format!("{} joined as {}", self.who_info(&p.sub, &p.session), p.role)
+                format!("{} joined as {}", self.who_info(&p.sub, &p.session), kind_of(&p.perms))
             }
             RoomEvent::ParticipantJoined { .. } => return None,
             RoomEvent::ParticipantLeft { participant: p } => {
-                format!("{} ({}) left", self.who_info(&p.sub, &p.session), p.role)
+                format!("{} ({}) left", self.who_info(&p.sub, &p.session), kind_of(&p.perms))
             }
-            RoomEvent::PublisherConnected { publisher_id, .. } => format!("Publisher {publisher_id} connected"),
-            RoomEvent::PublisherDisconnected { publisher_id, reason } => match reason {
-                PublisherGone::Disconnected => format!("Publisher {publisher_id} disconnected"),
-                PublisherGone::Replaced => format!("Publisher {publisher_id} replaced by a new session"),
+            RoomEvent::BroadcastStarted { broadcast, owner, .. } => {
+                format!("Broadcast {broadcast} started by {}", self.who(owner))
+            }
+            RoomEvent::BroadcastStopped { broadcast, reason } => match reason {
+                StopReason::Disconnected => format!("Broadcast {broadcast} stopped: owner disconnected"),
+                StopReason::Replaced => format!("Broadcast {broadcast} taken over by a new session"),
+                StopReason::Unadvertised => format!("Broadcast {broadcast} unadvertised"),
             },
-            RoomEvent::TrackPublished { track } => format!("Camera {} published", track.camera.id),
-            RoomEvent::TrackUpdated { track } => format!(
-                "Camera {} changed: {} {}x{}",
-                track.camera.id, track.camera.codec, track.camera.width, track.camera.height
-            ),
-            RoomEvent::TrackUnpublished { camera, reason } => format!("Camera {camera} unpublished: {reason}"),
-            RoomEvent::TrackOnline { camera } => format!("Camera {camera} online"),
-            RoomEvent::TrackOffline { camera, reason } => format!("Camera {camera} offline: {reason}"),
-            RoomEvent::OperatorChanged { from, to, reason } => match (reason, from, to) {
-                (OperatorChange::Claimed, _, Some(to)) => format!("{} took the claim", self.who(to)),
-                (OperatorChange::Forced, Some(from), Some(to)) => {
-                    format!("{} took the claim from {}", self.who(to), self.who(from))
+            RoomEvent::BroadcastRemoved { broadcast } => format!("Broadcast {broadcast} removed"),
+            RoomEvent::TrackPublished { track, info } => match &info.video {
+                Some(v) => format!("Track {track} published: video {}", v.codec),
+                None => format!("Track {track} published"),
+            },
+            RoomEvent::TrackUpdated { track, info } => match &info.video {
+                Some(v) => format!("Track {track} changed: {} {}x{}", v.codec, v.width, v.height),
+                None => format!("Track {track} changed"),
+            },
+            RoomEvent::TrackUnpublished { track } => format!("Track {track} unpublished"),
+            RoomEvent::TrackOnline { track } => format!("Track {track} online"),
+            RoomEvent::TrackOffline { track, reason } if reason.is_empty() => format!("Track {track} offline"),
+            RoomEvent::TrackOffline { track, reason } => format!("Track {track} offline: {reason}"),
+            RoomEvent::LockChanged { lock, from, to, reason } => match (reason, from, to) {
+                (LockChange::Claimed, _, Some(to)) => format!("{} took {lock}", self.who(to)),
+                (LockChange::Forced, Some(from), Some(to)) => {
+                    format!("{} took {lock} from {}", self.who(to), self.who(from))
                 }
-                (OperatorChange::Released, Some(from), _) => format!("{} released the claim", self.who(from)),
-                (OperatorChange::Left, Some(from), _) => format!("Claim freed: {} left", self.who(from)),
-                _ => "Operator changed".into(),
+                (LockChange::Released, Some(from), _) => format!("{} released {lock}", self.who(from)),
+                (LockChange::Left, Some(from), _) => format!("{lock} freed: {} left", self.who(from)),
+                _ => format!("{lock} changed hands"),
             },
-            RoomEvent::DeadmanTripped { reason } => format!("Robot safe-stopped: {reason}"),
-            RoomEvent::DeadmanCleared => "Robot armed".into(),
             RoomEvent::Unknown => return None,
         })
     }
@@ -362,11 +417,15 @@ impl Model {
         self.log.truncate(LOG_LINES);
     }
 
-    pub fn control(&self, msg: Control) {
-        self.shared.send(Command::Control(msg));
+    // --- teleop ---------------------------------------------------------
+
+    pub fn claim(&self, force: bool) {
+        self.shared.claim(force);
     }
 
-    // --- teleop ---------------------------------------------------------
+    pub fn release(&self) {
+        self.shared.release();
+    }
 
     pub fn update_drive(&mut self, cx: &mut Context<Self>) {
         let k = |c| self.keys.contains(c) as i32 as f64;
@@ -379,13 +438,13 @@ impl Model {
         cx.notify();
     }
 
-    /// Emergency stop: drop the claim; the robot trips at once.
+    /// Emergency stop: drop the drive lock; the robot trips at once.
     pub fn estop(&mut self, cx: &mut Context<Self>) {
         self.keys.clear();
         self.streaming = false;
         self.update_drive(cx);
-        self.control(Control::Release);
-        self.push_log("E-stop: claim released".into());
+        self.release();
+        self.push_log("E-stop: drive lock released".into());
     }
 }
 

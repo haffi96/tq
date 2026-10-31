@@ -1,4 +1,5 @@
-//! The camera grid. Each camera is two views: [`Video`], the picture alone,
+//! The video grid: one tile per video track of every broadcast. Each is
+//! two views: [`Video`], the picture alone,
 //! which a decoded frame re-renders, and [`Hud`], the chips and controls
 //! over it, which re-renders with the 2 Hz stats. A video frame re-renders
 //! the views on the path to its picture and replays everything else from
@@ -24,7 +25,7 @@ use crate::{
     session::Shared,
 };
 
-/// The newest picture of one camera.
+/// The newest picture of one video track.
 pub struct Video {
     feed: Arc<Feed>,
     /// The image in the window's sprite atlas. Each frame is a new image;
@@ -51,7 +52,7 @@ impl Video {
         }
     }
 
-    /// A new picture: re-render if this camera has one the UI has not
+    /// A new picture: re-render if this track has one the UI has not
     /// painted yet.
     pub fn on_frame(&mut self, cx: &mut Context<Self>) {
         if self.feed.has_new_picture() {
@@ -92,7 +93,7 @@ impl Video {
     }
 }
 
-/// Everything drawn over a camera's picture.
+/// Everything drawn over a track's picture.
 pub struct Hud {
     shared: Arc<Shared>,
     feed: Arc<Feed>,
@@ -125,7 +126,7 @@ impl Render for Hud {
             Level::Unknown
         };
         let has_picture = feed.picture().is_some();
-        let group = SharedString::from(format!("tile-{}", feed.info.id));
+        let group = SharedString::from(format!("tile-{}", feed.path));
         let theme = cx.theme();
 
         let mut tile = div()
@@ -157,7 +158,7 @@ impl Render for Hud {
             );
         }
 
-        // Top: camera name and format, latency and frame rate.
+        // Top: track name and format, latency and frame rate.
         let format = self.stats.as_ref().map(|s| {
             let size = s.size.map_or(String::new(), |(w, h)| format!(" {w}×{h}"));
             format!("{}{size}", codec_name(s.codec.as_deref()))
@@ -171,7 +172,7 @@ impl Render for Hud {
                 .justify_between()
                 .child(
                     chip()
-                        .child(div().font_semibold().child(feed.info.label.clone()))
+                        .child(div().font_semibold().child(feed.label.clone()))
                         .children(format.map(|f| div().opacity(0.7).child(f))),
                 )
                 .child(
@@ -207,7 +208,7 @@ impl Render for Hud {
         }
 
         // Bottom right, on hover: detail overlay and keyframe request.
-        let id = feed.info.id.clone();
+        let path = feed.path.clone();
         let shared = self.shared.clone();
         tile.child(
             chip()
@@ -236,7 +237,7 @@ impl Render for Hud {
                         .xsmall()
                         .ghost()
                         .tooltip("Request keyframe")
-                        .on_click(move |_, _, _: &mut App| shared.request_keyframe(&id, "user")),
+                        .on_click(move |_, _, _: &mut App| shared.request_keyframe(&path, "user")),
                 ),
         )
     }
@@ -267,20 +268,17 @@ impl Grid {
         }
     }
 
-    /// Model changed: new cameras get tiles, every tile gets fresh stats.
+    /// Model changed: new tracks get tiles, every tile gets fresh stats.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let model = self.model.read(cx);
         let shared = model.shared.clone();
         let feeds = shared.feeds();
-        let sync = model.shared.clock.lock().unwrap().sync_error_ms();
         let stats: Vec<_> = feeds
             .iter()
             .map(|f| {
-                model
-                    .stats
-                    .iter()
-                    .find(|(id, _)| *id == f.info.id)
-                    .map(|(_, s)| s.clone())
+                let id = f.path.to_string();
+                let stats = model.stats.iter().find(|(i, _)| *i == id).map(|(_, s)| s.clone());
+                (stats, shared.sync_error_ms(&f.path.broadcast))
             })
             .collect();
         if feeds.len() != self.tiles.len() {
@@ -300,7 +298,7 @@ impl Grid {
                 .collect();
             cx.notify();
         }
-        for ((_, hud), stats) in self.tiles.iter().zip(stats) {
+        for ((_, hud), (stats, sync)) in self.tiles.iter().zip(stats) {
             hud.update(cx, |t, cx| {
                 t.stats = stats;
                 t.sync = sync;
@@ -321,7 +319,7 @@ impl Render for Grid {
                 .gap_3()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(gpui_kit::assets::IconName::Cctv).size_8())
-                .child("Waiting for the publisher…");
+                .child("Waiting for video…");
         }
         for row in self.tiles.chunks(cols) {
             let mut r = h_flex().flex_1().gap_2().min_h_0();
@@ -359,7 +357,7 @@ fn details_text(s: &Stats, sync: Option<f64>) -> String {
     let sei = if s.capture_from_sei {
         ""
     } else {
-        "  (no SEI: capture = publisher time)"
+        "  (no SEI: no capture times)"
     };
     let mut lines = vec![
         format!(
@@ -381,7 +379,7 @@ fn details_text(s: &Stats, sync: Option<f64>) -> String {
     lines.join("\n")
 }
 
-/// One line per camera for `--log-stats`.
+/// One line per video track for `--log-stats`.
 pub fn overlay_text(s: &Stats, sync: Option<f64>) -> String {
     let size = s.size.map_or("–".to_string(), |(w, h)| format!("{w}x{h}"));
     format!(

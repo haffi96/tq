@@ -1,7 +1,8 @@
-//! One camera: its decoder thread, its latest picture and its numbers.
+//! One video track: its decoder thread, its latest picture and its numbers.
 //!
-//! The session pushes frames in decode order; the decoder thread decodes
-//! each one as soon as it arrives and replaces the camera's picture. There
+//! The session pushes frames in decode order (the SDK has already dropped
+//! the rest of any group a newer one superseded); the decoder thread decodes
+//! each one as soon as it arrives and replaces the track's picture. There
 //! is no jitter buffer: the UI draws whatever picture is newest when it
 //! renders.
 
@@ -11,12 +12,12 @@ use std::{
 };
 
 use bytes::Bytes;
-use tq_wire::{now_us, CameraInfo, FrameHeader, FLAG_CAPTURE_FROM_SEI};
+use tq_wire::{now_us, FrameHeader, Path, FLAG_CAPTURE_FROM_SEI};
 
 use crate::{
+    decode::{self, Decoder, Picture},
     session::Shared,
     stats::{Win, Window},
-    decode::{self, Decoder, Picture},
 };
 
 /// A frame that waited this long for the decoder is not worth showing: skip
@@ -25,6 +26,7 @@ const DECODE_STALL: Duration = Duration::from_millis(150);
 const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct Job {
+    pub group: u64,
     pub codec: Arc<str>,
     pub header: FrameHeader,
     pub payload: Bytes,
@@ -73,12 +75,14 @@ struct State {
     size: Option<(usize, usize)>,
     capture_from_sei: bool,
     last_error: Option<String>,
+    /// Group of the last frame, to count groups.
+    group: Option<u64>,
     c: Counters,
     w: Windows,
     last: (u64, u64, Option<Instant>),
 }
 
-/// Per-camera numbers for one report window.
+/// Per-track numbers for one report window.
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     pub codec: Option<String>,
@@ -102,42 +106,29 @@ pub struct Stats {
 }
 
 pub struct Feed {
-    pub info: CameraInfo,
-    group: Mutex<Option<u64>>,
+    /// `<broadcast>/<track>`.
+    pub path: Path,
+    /// As the tile shows it.
+    pub label: String,
     tx: mpsc::Sender<Msg>,
     state: Mutex<State>,
 }
 
 impl Feed {
-    pub fn spawn(info: CameraInfo, shared: Weak<Shared>) -> Arc<Self> {
+    pub fn spawn(path: Path, label: String, shared: Weak<Shared>) -> Arc<Self> {
         let (tx, rx) = mpsc::channel();
         let feed = Arc::new(Self {
-            info,
-            group: Mutex::new(None),
+            path,
+            label,
             tx,
             state: Mutex::default(),
         });
         let weak = Arc::downgrade(&feed);
         std::thread::Builder::new()
-            .name(format!("decode-{}", feed.info.id))
+            .name(format!("decode-{}", feed.path))
             .spawn(move || decode_loop(weak, shared, rx))
             .expect("spawn decoder thread");
         feed
-    }
-
-    /// Takes a new group stream if it is newer than the current one.
-    pub fn start_group(&self, group: u64) -> bool {
-        let mut g = self.group.lock().unwrap();
-        if g.is_some_and(|cur| group <= cur) {
-            return false;
-        }
-        *g = Some(group);
-        self.state.lock().unwrap().c.groups += 1;
-        true
-    }
-
-    pub fn is_current(&self, group: u64) -> bool {
-        *self.group.lock().unwrap() == Some(group)
     }
 
     pub fn push(&self, job: Job) {
@@ -147,7 +138,6 @@ impl Feed {
     /// The session ended: group numbers restart and the decoder must wait
     /// for a keyframe. The last picture stays up.
     pub fn reset(&self) {
-        *self.group.lock().unwrap() = None;
         let _ = self.tx.send(Msg::Reset);
     }
 
@@ -225,32 +215,44 @@ fn decode_loop(feed: Weak<Feed>, shared: Weak<Shared>, rx: mpsc::Receiver<Msg>) 
             Msg::Reset => {
                 decoder = None;
                 wait_key = true;
+                feed.state.lock().unwrap().group = None;
                 continue;
             }
         };
         let mut request_keyframe = |reason: &str| {
             if last_key_request.is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_INTERVAL) {
                 last_key_request = Some(Instant::now());
-                shared.request_keyframe(&feed.info.id, reason);
+                shared.request_keyframe(&feed.path, reason);
             }
         };
         let h = job.header;
         let key = h.is_key();
-        let clock = shared.clock.lock().unwrap().clone();
-        let capture_here = match (clock.pub_offset_us, clock.my_offset_us) {
-            // Capture time on this clock: publisher clock -> relay -> here.
-            (Some(p), Some(m)) => Some(h.capture_us as i64 - p + m),
-            _ => None,
-        };
+        // Relay and owner clocks, each minus this one.
+        let (relay, owner) = shared.offsets(&feed.path.broadcast);
+        // Capture times are real only from the encoder's SEI.
+        let sei = h.flags & FLAG_CAPTURE_FROM_SEI != 0;
+        let capture_here = owner.filter(|_| sei).map(|o| o.to_local(h.capture_us) as i64);
         {
             let mut s = feed.state.lock().unwrap();
             s.c.frames += 1;
             s.c.bytes += job.payload.len() as u64;
-            s.capture_from_sei = h.flags & FLAG_CAPTURE_FROM_SEI != 0;
-            s.w.capture_to_publisher.add((h.publisher_us as f64 - h.capture_us as f64) / 1000.0);
-            if let (Some(p), Some(m)) = (clock.pub_offset_us, clock.my_offset_us) {
-                s.w.publisher_to_relay.add((h.relay_us as i64 - (h.publisher_us as i64 - p)) as f64 / 1000.0);
-                s.w.relay_to_app.add((job.recv_us as i64 - m - h.relay_us as i64) as f64 / 1000.0);
+            if s.group != Some(job.group) {
+                s.group = Some(job.group);
+                s.c.groups += 1;
+            }
+            s.capture_from_sei = sei;
+            if sei {
+                s.w.capture_to_publisher
+                    .add((h.publisher_us as f64 - h.capture_us as f64) / 1000.0);
+            }
+            if let Some(r) = relay {
+                let relay_here = r.to_local(h.relay_us) as i64;
+                s.w.relay_to_app.add((job.recv_us as i64 - relay_here) as f64 / 1000.0);
+                if let Some(o) = owner {
+                    let publisher_here = o.to_local(h.publisher_us) as i64;
+                    s.w.publisher_to_relay
+                        .add((relay_here - publisher_here) as f64 / 1000.0);
+                }
             }
             if key {
                 s.c.keyframes += 1;
@@ -310,7 +312,7 @@ fn decode_loop(feed: Weak<Feed>, shared: Weak<Shared>, rx: mpsc::Receiver<Msg>) 
                 s.c.errors += 1;
                 s.last_error = Some(format!("{e:#}"));
                 drop(s);
-                tracing::warn!(camera = %feed.info.id, "decode: {e:#}");
+                tracing::warn!(track = %feed.path, "decode: {e:#}");
                 wait_key = true;
                 request_keyframe("decoder error");
             }

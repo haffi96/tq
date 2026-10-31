@@ -8,7 +8,7 @@
 //! {
 //!   "relay_http": "https://tq-relay-1.haffi.dev",
 //!   "room": "robot-01",
-//!   "role": "operator",
+//!   "preset": "operator",
 //!   "secret": "…"
 //! }
 //! ```
@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
-use tq_wire::Role;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,7 +24,9 @@ pub struct File {
     pub relay_http: Option<String>,
     pub relay: Option<String>,
     pub room: Option<String>,
-    pub role: Option<Role>,
+    /// Token preset, `operator` or `viewer`; `role` before protocol 3.0.
+    #[serde(alias = "role")]
+    pub preset: Option<String>,
     pub token: Option<String>,
     pub secret: Option<String>,
     #[serde(default)]

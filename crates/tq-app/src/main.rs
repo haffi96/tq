@@ -5,7 +5,7 @@
 //! drawn as images.
 //!
 //! ```text
-//! tq-app --role operator --room robot-01      # relay on http://127.0.0.1:8080
+//! tq-app --preset operator --room robot-01      # relay on http://127.0.0.1:8080
 //! ```
 //!
 //! Started without flags (from Finder, or a desktop launcher) it reads its
@@ -34,7 +34,6 @@ use gpui_kit::{
     component::{Theme, TitleBar},
     px, size, App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions,
 };
-use tq_wire::Role;
 
 actions!(tq_app, [Quit]);
 
@@ -56,16 +55,16 @@ struct Args {
     /// The room (robot) to join. Default robot-01.
     #[arg(long)]
     room: Option<String>,
-    /// operator or viewer (default).
-    #[arg(long)]
-    role: Option<Role>,
+    /// Token preset: operator or viewer (default).
+    #[arg(long, alias = "role")]
+    preset: Option<String>,
     /// Session token. Without one the app signs its own with --secret, or
     /// asks a --dev relay for one.
     #[arg(long)]
     token: Option<String>,
     #[arg(long, env = "TQ_SHARED_SECRET", hide_env_values = true)]
     secret: Option<String>,
-    /// Also log each camera's numbers every 2 s (headless checks).
+    /// Also log each video track's numbers every 2 s (headless checks).
     #[arg(long)]
     log_stats: bool,
     /// Print whether a newer release exists, then exit.
@@ -93,9 +92,9 @@ fn main() -> anyhow::Result<()> {
     }
     update::clean_stale_staging();
 
-    let role = args.role.or(file.role).unwrap_or(Role::Viewer);
-    if role == Role::Publisher {
-        anyhow::bail!("--role must be operator or viewer");
+    let preset = args.preset.or(file.preset).unwrap_or_else(|| "viewer".into());
+    if !matches!(preset.as_str(), "operator" | "viewer") {
+        anyhow::bail!("--preset must be operator or viewer, not '{preset}'");
     }
     tracing::info!(%build, "starting");
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -113,13 +112,13 @@ fn main() -> anyhow::Result<()> {
         http,
         relay: args.relay.or(file.relay),
         room: args.room.or(file.room).unwrap_or_else(|| "robot-01".into()),
-        role,
+        preset,
         token: args.token.or(file.token),
         secret: args.secret.or(file.secret),
         log_stats: args.log_stats,
         build,
     };
-    let title = format!("tq · {} · {}", config.room, config.role);
+    let title = format!("tq · {} · {}", config.room, config.preset);
     let shared = session::start(&rt, config, events_tx);
 
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {

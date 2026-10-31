@@ -1,4 +1,4 @@
-//! The window: a dock console. Title bar on top, the camera grid in the
+//! The window: a dock console. Title bar on top, the video grid in the
 //! middle with the events panel under it, a resizable sidebar with the
 //! operator controls, latency and link on the right, a status bar below.
 //!

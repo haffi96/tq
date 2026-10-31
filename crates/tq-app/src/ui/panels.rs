@@ -1,6 +1,6 @@
 //! The panels around the video: title bar, the sidebar with operator
 //! controls, latency and link, the events panel and the status bar. Each
-//! re-renders only when the [`Model`] changes (control messages, key
+//! re-renders only when the [`Model`] changes (room states and events, key
 //! presses, the 2 Hz stats tick), never for a video frame.
 
 use gpui_kit::{
@@ -16,13 +16,13 @@ use gpui_kit::{
     prelude::*,
     px, AnyElement, App, Context, Entity, SharedString, Window,
 };
-use tq_wire::{BuildInfo, Compat, Control, Role};
+use tq_wire::{BuildInfo, Compat};
 
 use super::{
-    model::{Model, UpdateState},
+    model::{kind_of, Model, UpdateState},
     widgets::*,
 };
-use crate::session::{Command, ConnState};
+use crate::session::ConnState;
 
 macro_rules! panel {
     ($name:ident) => {
@@ -61,11 +61,17 @@ impl Render for Header {
         let m = self.model.read(cx);
         let c = &m.shared.config;
         let (conn_text, conn_color) = conn(m, cx);
-        let publisher = m.state.as_ref().and_then(|s| s.publisher.as_ref());
-        let pub_status = match publisher {
-            None => status("Publisher offline".to_string(), cx.theme().danger),
-            Some(p) => status(
-                format!("{} · {} ms", p.publisher_id, fmt(p.rtt_ms, 1)),
+        let others = m.state.as_ref().map_or(0, |s| s.broadcasts.len().saturating_sub(1));
+        let more = if others > 0 {
+            format!("  +{others}")
+        } else {
+            String::new()
+        };
+        let pub_status = match m.main_broadcast() {
+            None => status("No broadcasts".to_string(), cx.theme().danger),
+            Some(b) if b.owner.is_none() => status(format!("{} offline{more}", b.name), cx.theme().danger),
+            Some(b) => status(
+                format!("{} · {} ms{more}", b.name, fmt(b.rtt_ms, 1)),
                 cx.theme().success,
             ),
         };
@@ -202,22 +208,19 @@ impl Sidebar {
     fn control(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.model.clone();
         let m = self.model.read(cx);
-        let holder = m.state.as_ref().and_then(|s| s.operator.clone());
-        let mine = holder.is_some() && holder == m.session;
-        let claim = match &holder {
-            None => Tag::secondary().child("Free"),
-            Some(_) if mine => Tag::success().child("You are driving"),
-            Some(h) => Tag::warning().child(format!("Held by {}", short(h))),
+        let target = m.drive_broadcast().map(|b| b.name.clone());
+        let holder = m.drive_holder();
+        let claim = match (&target, holder) {
+            (None, _) => Tag::secondary().child("Nothing to drive"),
+            (Some(_), None) => Tag::secondary().child("Free"),
+            (Some(_), Some(_)) if m.driving() => Tag::success().child("You are driving"),
+            (Some(_), Some(h)) => Tag::warning().child(format!("Held by {}", short(h))),
         };
-        let teleop = m
-            .state
-            .as_ref()
-            .and_then(|s| s.publisher.as_ref())
-            .map(|p| p.teleop.clone());
+        let teleop = target.as_deref().and_then(|b| m.robot_teleop(b));
         let deadman = match &teleop {
             None => Tag::secondary().child("Dead-man –"),
             // The reason rides in the tag so the controls never move.
-            Some(t) if t.deadman_tripped => Tag::danger().child(format!("Safe-stopped · {}", t.reason)),
+            Some(t) if t.tripped => Tag::danger().child(format!("Safe-stopped · {}", t.reason)),
             Some(_) => Tag::success().child("Armed"),
         };
         let drive = *m.shared.drive.lock().unwrap();
@@ -236,9 +239,9 @@ impl Sidebar {
         };
         let last_ack = t.last_ack_detail.clone();
         drop(t);
-        let send = |msg: Control| {
+        let act = |f: fn(&Model)| {
             let model = model.clone();
-            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| model.read(cx).control(msg.clone())
+            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| f(model.read(cx))
         };
         let keys = m.keys.clone();
         let streaming = m.streaming;
@@ -263,7 +266,11 @@ impl Sidebar {
 
         v_flex()
             .gap_3()
-            .child(section("Control", None, cx))
+            .child(section(
+                "Control",
+                target.map(|b| div().child(b).into_any_element()),
+                cx,
+            ))
             .child(h_flex().gap_2().child(claim.small()).child(deadman.small()))
             .child(
                 h_flex()
@@ -273,20 +280,20 @@ impl Sidebar {
                             .primary()
                             .small()
                             .label("Claim")
-                            .on_click(send(Control::Claim { force: false })),
+                            .on_click(act(|m| m.claim(false))),
                     )
                     .child(
                         Button::new("force")
                             .small()
                             .label("Force claim")
-                            .on_click(send(Control::Claim { force: true })),
+                            .on_click(act(|m| m.claim(true))),
                     )
                     .child(
                         Button::new("release")
                             .small()
                             .outline()
                             .label("Release")
-                            .on_click(send(Control::Release)),
+                            .on_click(act(|m| m.release())),
                     ),
             )
             .child(
@@ -333,12 +340,7 @@ impl Sidebar {
                     )
                     .child(Button::new("ping").small().ghost().label("Send ping").on_click({
                         let model = model.clone();
-                        move |_, _, cx| {
-                            model.read(cx).shared.send(Command::Teleop {
-                                command: "ping".into(),
-                                args: serde_json::json!({}),
-                            })
-                        }
+                        move |_, _, cx| model.read(cx).shared.send_drive("ping", serde_json::json!({}))
                     })),
             )
             .child(
@@ -369,7 +371,7 @@ impl Sidebar {
             cx,
         ));
         for feed in m.shared.feeds() {
-            let id = &feed.info.id;
+            let id = &feed.path.to_string();
             let stats = m.stats.iter().find(|(i, _)| i == id).map(|(_, s)| s);
             let live = stats.is_some_and(|s| s.fps >= 0.5);
             let render = stats.and_then(|s| s.capture_to_render.avg).filter(|_| live);
@@ -383,13 +385,7 @@ impl Sidebar {
                         h_flex()
                             .justify_between()
                             .items_end()
-                            .child(metric(
-                                SharedString::from(feed.info.label.clone()),
-                                render,
-                                "ms",
-                                color,
-                                cx,
-                            ))
+                            .child(metric(SharedString::from(feed.label.clone()), render, "ms", color, cx))
                             .child(
                                 v_flex()
                                     .items_end()
@@ -407,13 +403,18 @@ impl Sidebar {
 
     fn link(&self, cx: &mut Context<Self>) -> AnyElement {
         let m = self.model.read(cx);
-        let clock = m.shared.clock.lock().unwrap().clone();
-        let publisher = m.state.as_ref().and_then(|s| s.publisher.as_ref());
-        let pub_rtt = publisher.and_then(|p| p.rtt_ms);
+        let broadcast = m.main_broadcast();
+        let pub_rtt = broadcast.and_then(|b| b.rtt_ms);
+        let relay_rtt = m.shared.relay_rtt_ms();
+        let sync = broadcast.and_then(|b| m.shared.sync_error_ms(&b.name));
         let history: Vec<_> = m.rtt_history.iter().copied().collect();
         let mut col = v_flex()
             .gap_1()
-            .child(section("Link", None, cx))
+            .child(section(
+                "Link",
+                broadcast.map(|b| div().child(b.name.clone()).into_any_element()),
+                cx,
+            ))
             .child(
                 h_flex()
                     .gap_6()
@@ -425,11 +426,11 @@ impl Sidebar {
                         Level::of_ms(pub_rtt, 80., 200.).color(cx),
                         cx,
                     ))
-                    .child(metric("Relay RTT", clock.relay_rtt_ms, "ms", cx.theme().foreground, cx)),
+                    .child(metric("Relay RTT", relay_rtt, "ms", cx.theme().foreground, cx)),
             )
             .child(sparkline("link-rtt", history, cx.theme().chart_2))
-            .child(kv("clock sync", format!("±{} ms", fmt(clock.sync_error_ms(), 1)), cx));
-        if let Some(q) = publisher.and_then(|p| p.quic.as_ref()) {
+            .child(kv("clock sync", format!("±{} ms", fmt(sync, 1)), cx));
+        if let Some(q) = broadcast.and_then(|b| b.quic.as_ref()) {
             col = col
                 .child(kv(
                     "uplink rtt / cwnd",
@@ -450,12 +451,12 @@ impl Sidebar {
 }
 
 impl Sidebar {
-    /// Versions of the app, the relay and the publisher, and updates.
+    /// Versions of the app, the relay and each broadcast's owner, and
+    /// updates.
     fn about(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.model.clone();
         let m = self.model.read(cx);
         let connected = m.session.is_some();
-        let publisher = m.state.as_ref().and_then(|s| s.publisher.as_ref()).is_some();
         let app = &m.shared.config.build;
         let mut col = v_flex()
             .gap_1()
@@ -464,11 +465,13 @@ impl Sidebar {
             .child(match (connected, &m.relay_build) {
                 (false, _) => version_row("relay", "–".into(), Compat::Same, cx),
                 (true, b) => version_row("relay", build_text(b.as_ref()), Compat::of_build(b.as_ref()), cx),
-            })
-            .child(match (publisher, m.publisher_build()) {
-                (false, _) => version_row("publisher", "–".into(), Compat::Same, cx),
-                (true, b) => version_row("publisher", build_text(b), Compat::of_build(b), cx),
             });
+        for b in m.state.iter().flat_map(|s| &s.broadcasts) {
+            col = col.child(match (&b.owner, b.build.as_ref()) {
+                (None, _) => version_row(b.name.clone(), "offline".into(), Compat::Same, cx),
+                (Some(_), build) => version_row(b.name.clone(), build_text(build), Compat::of_build(build), cx),
+            });
+        }
 
         let (status_text, status_color) = match &m.update {
             UpdateState::Idle => (String::new(), cx.theme().muted_foreground),
@@ -523,14 +526,14 @@ impl Sidebar {
 
 fn build_text(b: Option<&BuildInfo>) -> String {
     b.map_or_else(
-        || "unknown · protocol 1.0".into(),
+        || "unknown".into(),
         |b| format!("{} · protocol {}", b.short(), b.protocol),
     )
 }
 
 /// `label ..... version`, in the warning color when the protocol minor
 /// differs from the app's.
-fn version_row(label: &'static str, text: String, compat: Compat, cx: &App) -> impl IntoElement {
+fn version_row(label: impl Into<SharedString>, text: String, compat: Compat, cx: &App) -> impl IntoElement {
     let t = cx.theme();
     let color = match compat {
         Compat::Same => t.foreground,
@@ -541,7 +544,7 @@ fn version_row(label: &'static str, text: String, compat: Compat, cx: &App) -> i
         .justify_between()
         .gap_2()
         .text_xs()
-        .child(div().text_color(t.muted_foreground).child(label))
+        .child(div().text_color(t.muted_foreground).child(label.into()))
         .child(
             div()
                 .font_family(t.mono_font_family.clone())
@@ -556,32 +559,39 @@ impl Render for Events {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = self.model.read(cx);
         let t = cx.theme();
-        let cameras = m
+        let mut cams = v_flex().gap_1().child(section("Tracks", None, cx));
+        let tracks: Vec<_> = m
             .state
-            .as_ref()
-            .and_then(|s| s.publisher.as_ref())
-            .map(|p| p.camera_status.clone())
-            .unwrap_or_default();
-        let mut cams = v_flex().gap_1().child(section("Publisher cameras", None, cx));
-        for c in &cameras {
-            cams = cams.child(
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .font_family(t.mono_font_family.clone())
-                    .child(status(c.id.clone(), if c.online { t.success } else { t.danger }))
-                    .child(
-                        div()
-                            .text_color(t.muted_foreground)
-                            .child(c.codec_string.clone().unwrap_or_default()),
-                    )
-                    .child(format!("{:.1} fps", c.fps))
-                    .child(format!("{:.0} kbps", c.kbps))
-                    .child(format!("drops {}", c.dropped))
-                    .child(format!("capture→pub {} ms", fmt(c.capture_to_publisher_ms, 1))),
-            );
+            .iter()
+            .flat_map(|s| &s.broadcasts)
+            .flat_map(|b| b.tracks.iter().map(move |tr| (b, tr)))
+            .collect();
+        for (b, tr) in &tracks {
+            let st = &tr.stats;
+            let mut row = h_flex()
+                .gap_3()
+                .text_xs()
+                .font_family(t.mono_font_family.clone())
+                .child(status(
+                    format!("{}/{}", b.name, tr.info.id),
+                    if tr.online { t.success } else { t.danger },
+                ))
+                .child(
+                    div().text_color(t.muted_foreground).child(
+                        st.codec_string
+                            .clone()
+                            .unwrap_or_else(|| format!("{:?}", tr.info.kind).to_lowercase()),
+                    ),
+                )
+                .child(format!("{:.1} fps", st.fps))
+                .child(format!("{:.0} kbps", st.kbps))
+                .child(format!("drops {}", st.dropped));
+            if st.capture_to_publisher_ms.is_some() {
+                row = row.child(format!("capture→pub {} ms", fmt(st.capture_to_publisher_ms, 1)));
+            }
+            cams = cams.child(row);
         }
-        if cameras.is_empty() {
+        if tracks.is_empty() {
             cams = cams.child(div().text_xs().text_color(t.muted_foreground).child("–"));
         }
         let mut log = v_flex().gap_0p5().child(section("Events", None, cx));
@@ -620,14 +630,13 @@ impl Render for Status {
         let m = self.model.read(cx);
         let t = cx.theme();
         let (conn_text, conn_color) = conn(m, cx);
-        let clock = m.shared.clock.lock().unwrap().clone();
         let mut left = h_flex().gap_4().child(status(conn_text, conn_color));
         if let Some(s) = &m.session {
             left = left.child(format!("session {}", short(s)));
         }
         left = left
-            .child(format!("relay {} ms", fmt(clock.relay_rtt_ms, 1)))
-            .child(format!("sync ±{} ms", fmt(clock.sync_error_ms(), 1)));
+            .child(format!("relay {} ms", fmt(m.shared.relay_rtt_ms(), 1)))
+            .child(format!("sync ±{} ms", fmt(m.shared.worst_sync_error_ms(), 1)));
         let mut right = h_flex().gap_4();
         if let UpdateState::Available(r) = &m.update {
             right = right.child(
@@ -647,20 +656,22 @@ impl Render for Status {
                     .child(format!("relay {}", relay.map_or("?", |b| b.version.as_str()))),
             );
         }
-        if m.state.as_ref().is_some_and(|s| s.publisher.is_some()) {
-            let p = m.publisher_build();
+        for b in m.state.iter().flat_map(|s| &s.broadcasts).filter(|b| b.owner.is_some()) {
+            let p = b.build.as_ref();
             versions = versions.child("·").child(
                 div()
                     .when(Compat::of_build(p) != Compat::Same, |d| d.text_color(t.warning))
-                    .child(format!("publisher {}", p.map_or("?", |b| b.version.as_str()))),
+                    .child(format!("{} {}", b.name, p.map_or("?", |b| b.version.as_str()))),
             );
         }
         right = right.child(versions);
         if let Some(s) = &m.state {
+            let count = |k| s.participants.iter().filter(|p| kind_of(&p.perms) == k).count();
             right = right.child(format!(
-                "{} operator · {} viewer",
-                s.count(Role::Operator),
-                s.count(Role::Viewer)
+                "{} operator · {} viewer · {} robot",
+                count("operator"),
+                count("viewer"),
+                count("robot")
             ));
         }
         right = right.child(format!("UI frame {} ms", fmt(m.frame_cost.avg, 2)));
