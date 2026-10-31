@@ -84,8 +84,9 @@ export type FromWorker =
   | { type: 'status'; state: 'connecting' | 'connected' | 'closed'; detail?: string }
   | { type: 'control'; msg: Control }
   | { type: 'room'; msg: RoomMessage }
-  /** One message of a subscribed JSON data track. */
-  | { type: 'data'; track: Path; value: unknown }
+  /** One message of a subscribed JSON data track, and its capture time
+   *  on this machine's clock (Unix µs; arrival time when unknown). */
+  | { type: 'data'; track: Path; value: unknown; atUs: number }
   | {
       type: 'stats';
       cameras: Record<Path, CameraStats>;
@@ -385,13 +386,29 @@ class DataTrack implements Track {
     return this.delivery === 'stream' || this.group === group;
   }
 
-  frame(_header: FrameHeader, data: Uint8Array, codec: string) {
+  frame(header: FrameHeader, data: Uint8Array, codec: string) {
     if (codec !== 'json') return;
+    let value: unknown;
     try {
-      post({ type: 'data', track: this.path, value: decodeJson(data) });
+      value = decodeJson(data);
     } catch {
-      // Not JSON after all; nothing to show.
+      return; // Not JSON after all; nothing to show.
     }
+    // The relay replays the newest group on subscribing, so a message can
+    // be old: say when it was captured, on this clock. Right after
+    // connecting the offsets may not be measured yet: a `stream` message
+    // (an event, logged in time order) waits up to a second for them;
+    // others (latest wins, so order matters) use the arrival time.
+    const recvUs = nowUs();
+    const broadcast = this.path.split('/')[0]!;
+    const deliver = (tries: number) => {
+      const pubOff = ownerClock(broadcast)?.offsetUs ?? null;
+      const myOff = clock.myOffsetUs;
+      if ((pubOff === null || myOff === null) && tries > 0) return void setTimeout(() => deliver(tries - 1), 50);
+      const atUs = pubOff === null || myOff === null ? recvUs : header.captureUs - pubOff + myOff;
+      post({ type: 'data', track: this.path, value, atUs });
+    };
+    deliver(this.delivery === 'stream' ? 20 : 0);
   }
 
   reset() {

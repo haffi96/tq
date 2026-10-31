@@ -342,7 +342,7 @@ function onRoom(msg: RoomMessage) {
 
 // A message on a broadcast's data track: `.status` feeds the dead-man
 // display, `.events` goes to the log.
-function onData(track: Path, value: unknown) {
+function onData(track: Path, value: unknown, atUs: number) {
   const [broadcast, name] = track.split('/') as [string, string];
   if (name === '.status') {
     const prev = statuses.get(broadcast)?.teleop;
@@ -353,13 +353,19 @@ function onData(track: Path, value: unknown) {
     }
     renderDeadman(driveTarget());
   } else if (name === '.events') {
-    log(`${broadcast}: ${JSON.stringify(value)}`);
+    log(`${broadcast}: ${JSON.stringify(value)}`, atUs / 1000);
   }
 }
 
-function log(line: string) {
-  const box = $('log');
-  box.textContent = `${new Date().toLocaleTimeString()} ${line}\n${box.textContent}`.slice(0, 4000);
+// Newest first. A line with a time (Unix ms) goes after any newer ones: a
+// broadcast's `.events` replayed on subscribing can be older than lines
+// before it.
+const logLines: { atMs: number; text: string }[] = [];
+function log(line: string, atMs = Date.now()) {
+  const i = logLines.findIndex((l) => l.atMs <= atMs);
+  logLines.splice(i < 0 ? logLines.length : i, 0, { atMs, text: `${new Date(atMs).toLocaleTimeString()} ${line}` });
+  logLines.length = Math.min(logLines.length, 100);
+  $('log').textContent = logLines.map((l) => l.text).join('\n');
 }
 
 // --- teleop ----------------------------------------------------------------
@@ -455,7 +461,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       onRoom(msg.msg);
       break;
     case 'data':
-      onData(msg.track, msg.value);
+      onData(msg.track, msg.value, msg.atUs);
       break;
     case 'stats': {
       for (const [p, s] of Object.entries(msg.cameras)) renderCameraStats(p, s);
