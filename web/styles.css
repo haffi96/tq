@@ -32,6 +32,7 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
 #grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr)); gap: 8px; padding: 8px; }
 .tile { position: relative; background: #000; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .tile.stale { border-color: var(--warn); }
+.tile.offline { border-color: var(--bad); }
 .tile canvas { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; background: #000; }
 .tilebar { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 4px 6px; background: linear-gradient(rgba(0,0,0,.7), transparent); }
 .label { font-weight: 600; }

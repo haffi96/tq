@@ -3,15 +3,19 @@
 // input and shows the numbers.
 
 import {
+  type BroadcastState,
   type BuildInfo,
-  type CameraInfo,
   type Control,
-  type Role,
+  type ParticipantInfo,
+  type Path,
+  type RobotStatus,
   type RoomEventBody,
   type RoomMessage,
   type RoomState,
+  type TrackInfo,
   compat,
   mismatch,
+  path,
   shortBuild,
 } from './protocol';
 import { WEB_BUILD } from './version';
@@ -20,12 +24,19 @@ import type { CameraStats, FromWorker, ToWorker, Window } from './worker';
 /** Set by build.sh from TQ_RELAY_HTTP; empty when the relay serves the page. */
 declare const TQ_RELAY_HTTP: string;
 
+type Preset = 'operator' | 'viewer';
+
 const params = new URLSearchParams(location.search);
 const room = params.get('room') ?? 'robot-01';
-const role: Role = params.get('role') === 'operator' ? 'operator' : 'viewer';
+// `role=` is what links from before protocol 3.0 say.
+const preset: Preset = (params.get('preset') ?? params.get('role')) === 'operator' ? 'operator' : 'viewer';
 // Photons -> capture timestamp (exposure, readout, ISP/USB) that the
 // camera's timestamp does not cover; calibrate with an optical measurement.
 const sensorMs = Number(params.get('sensor_ms') ?? 0) || 0;
+
+/** The teleop lock and channels (crates/tq-teleop). */
+const DRIVE = 'drive';
+const ESTOP = 'estop';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) => {
@@ -41,42 +52,67 @@ const send = (msg: ToWorker, transfer: Transferable[] = []) => worker.postMessag
 let session: string | null = null;
 let state: RoomState | null = null;
 let relayBuild: BuildInfo | null = null;
-let publisherSeen: string | null = null;
-const tiles = new Map<string, { root: HTMLElement; overlay: HTMLElement; label: HTMLElement }>();
+const ownersSeen = new Map<string, string>();
+/** Each broadcast's latest `.status` message. */
+const statuses = new Map<string, RobotStatus>();
+const tiles = new Map<Path, { root: HTMLElement; overlay: HTMLElement; label: HTMLElement }>();
 
 const fmt = (v: number | null | undefined, digits = 0) => (v === null || v === undefined ? '–' : v.toFixed(digits));
 const win = (w: Window) => (w.avg === null ? '–' : `${w.avg.toFixed(1)}/${w.max!.toFixed(1)}`);
-let syncErrorMs: number | null = null;
+
+// The broadcast the operator drives: the first with a drive lock.
+function driveTarget(): BroadcastState | null {
+  return state?.broadcasts.find((b) => b.locks.some((l) => l.info.id === DRIVE)) ?? null;
+}
 
 // --- tiles -----------------------------------------------------------------
 
-function ensureTiles(cameras: CameraInfo[]) {
+const tileLabel = (p: Path, info: TrackInfo) => (info.label ? `${info.label} · ${p}` : p);
+
+// A tile per video track of every broadcast; tracks that are gone lose
+// theirs. (Called with a state only: a disconnect keeps the tiles.)
+function syncTiles(s: RoomState) {
   const grid = $('grid');
-  for (const cam of cameras) {
-    if (tiles.has(cam.id)) {
-      tiles.get(cam.id)!.label.textContent = `${cam.label} · ${cam.id}`;
-      continue;
+  const live = new Set<Path>();
+  for (const b of s.broadcasts) {
+    for (const t of b.tracks) {
+      if (t.info.kind !== 'video') continue;
+      const p = path(b.name, t.info.id);
+      live.add(p);
+      const existing = tiles.get(p);
+      if (existing) {
+        existing.label.textContent = tileLabel(p, t.info);
+        existing.root.classList.toggle('offline', !t.online);
+        continue;
+      }
+      const root = el('div', 'tile');
+      const canvas = el('canvas');
+      const label = el('div', 'label', tileLabel(p, t.info));
+      const overlay = el('pre', 'overlay', 'waiting for keyframe…');
+      const key = el('button', 'small', 'keyframe');
+      key.title = 'Ask the broadcast owner for a keyframe';
+      key.onclick = () => send({ type: 'control', msg: { type: 'keyframe_request', track: p, reason: 'user' } });
+      const bar = el('div', 'tilebar');
+      bar.append(label, key);
+      root.append(canvas, bar, overlay);
+      root.classList.toggle('offline', !t.online);
+      grid.append(root);
+      const offscreen = canvas.transferControlToOffscreen();
+      send({ type: 'canvas', track: p, canvas: offscreen }, [offscreen]);
+      tiles.set(p, { root, overlay, label });
     }
-    const root = el('div', 'tile');
-    const canvas = el('canvas');
-    const label = el('div', 'label', `${cam.label} · ${cam.id}`);
-    const overlay = el('pre', 'overlay', 'waiting for keyframe…');
-    const key = el('button', 'small', 'keyframe');
-    key.title = 'Ask the publisher for a keyframe (the encoder has no hook; it logs the request)';
-    key.onclick = () => send({ type: 'control', msg: { type: 'keyframe_request', camera: cam.id, reason: 'user' } });
-    const bar = el('div', 'tilebar');
-    bar.append(label, key);
-    root.append(canvas, bar, overlay);
-    grid.append(root);
-    const offscreen = canvas.transferControlToOffscreen();
-    send({ type: 'canvas', camera: cam.id, canvas: offscreen }, [offscreen]);
-    tiles.set(cam.id, { root, overlay, label });
+  }
+  for (const [p, tile] of tiles) {
+    if (live.has(p)) continue;
+    tile.root.remove();
+    tiles.delete(p);
   }
 }
 
-function renderCameraStats(id: string, s: CameraStats) {
-  const tile = tiles.get(id);
+function renderCameraStats(p: Path, s: CameraStats) {
+  const tile = tiles.get(p);
   if (!tile) return;
+  // Capture times are the owner's receive time without the encoder's SEI.
   const sei = s.captureFromSei ? '' : ' (no SEI: capture = publisher time)';
   tile.overlay.textContent = [
     `${s.codec ?? '–'} ${s.size}${s.spsPatched ? ' sps-patched' : ''}`,
@@ -89,7 +125,7 @@ function renderCameraStats(id: string, s: CameraStats) {
     `  decode        ${win(s.decode)}`,
     `  capture→drawn ${win(s.captureToDrawn)}`,
     `  draw→display≈ ${win(s.drawToDisplay)}`,
-    `  glass→glass≈  ${win(s.glassToGlass)}  ±${fmt(syncErrorMs, 1)} sync${sensorMs ? ` +${sensorMs} sensor` : ''}`,
+    `  glass→glass≈  ${win(s.glassToGlass)}  ±${fmt(s.syncErrorMs, 1)} sync${sensorMs ? ` +${sensorMs} sensor` : ''}`,
   ].join('\n');
   tile.root.classList.toggle('stale', s.fps < 0.5);
 }
@@ -99,10 +135,9 @@ function renderCameraStats(id: string, s: CameraStats) {
 const describe = (b: BuildInfo | null | undefined) =>
   b ? `${shortBuild(b)}, protocol ${b.protocol.major}.${b.protocol.minor}` : 'unknown (protocol 1.0)';
 
-// "web 0.1.0 · relay 0.1.0 · publisher 0.1.0"; amber when a protocol minor
+// "web 0.1.0 · relay 0.1.0 · rover 0.1.0"; amber when a protocol minor
 // differs (works, but one side may lack features). Hover for commits.
 function renderVersions() {
-  const p = state?.publisher;
   const parts = [`web ${WEB_BUILD.version}`];
   const title = [`web ${describe(WEB_BUILD)}`];
   let warn = false;
@@ -111,27 +146,44 @@ function renderVersions() {
     title.push(`relay ${describe(relayBuild)}`);
     warn ||= compat(relayBuild) !== 'same';
   }
-  if (p) {
-    parts.push(`publisher ${p.build?.version ?? '?'}`);
-    title.push(`publisher ${describe(p.build)}`);
-    warn ||= compat(p.build) !== 'same';
+  for (const b of state?.broadcasts ?? []) {
+    if (!b.owner) continue;
+    parts.push(`${b.name} ${b.build?.version ?? '?'}`);
+    title.push(`${b.name}: ${b.build?.component ?? 'owner'} ${describe(b.build)}`);
+    warn ||= compat(b.build) !== 'same';
+    const line = `${b.name} is published by ${b.build?.component ?? 'a session'} ${describe(b.build)}`;
+    if (ownersSeen.get(b.name) !== line) {
+      ownersSeen.set(b.name, line);
+      log(line);
+      if (compat(b.build) !== 'same') log(`warning: ${mismatch(b.name, b.build)}`);
+    }
   }
   const pill = $('versions');
   pill.textContent = parts.join(' · ');
   pill.title = title.join('\n');
   pill.className = `pill ${warn ? 'warn' : ''}`;
-
-  if (p) {
-    const line = `publisher ${p.publisher_id} runs ${describe(p.build)}`;
-    if (line !== publisherSeen) {
-      publisherSeen = line;
-      log(line);
-      if (compat(p.build) !== 'same') log(`warning: ${mismatch('publisher', p.build)}`);
-    }
-  }
 }
 
 // --- room state ------------------------------------------------------------
+
+// What a participant may do, from its permissions.
+function kind(p: ParticipantInfo): 'publisher' | 'operator' | 'viewer' {
+  if (p.perms.some((x) => x.startsWith('pub:'))) return 'publisher';
+  if (p.perms.some((x) => x.startsWith('lock:') || x.startsWith('write:'))) return 'operator';
+  return 'viewer';
+}
+
+function renderDeadman(b: BroadcastState | null) {
+  const t = b?.owner ? statuses.get(b.name)?.teleop : undefined;
+  const dm = $('deadman');
+  if (!t) {
+    dm.textContent = 'dead-man: –';
+    dm.className = 'deadman';
+    return;
+  }
+  dm.textContent = t.tripped ? `SAFE-STOPPED: ${t.reason}` : `ARMED · ${who(t.holder)}`;
+  dm.className = `deadman ${t.tripped ? 'tripped' : 'armed'}`;
+}
 
 function renderState() {
   if (!state) {
@@ -139,56 +191,63 @@ function renderState() {
     $('claim-status').textContent = '–';
     $('claim-status').className = 'pill';
     document.body.classList.remove('driving');
-    $('publisher').textContent = 'publisher offline';
+    $('publisher').textContent = 'no broadcasts';
     $('publisher').className = 'pill bad';
-    $('deadman').textContent = 'dead-man: –';
-    $('deadman').className = 'deadman';
+    renderDeadman(null);
     $('viewers').textContent = '';
     renderVersions();
     return;
   }
-  const p = state.publisher;
-  ensureTiles(state.tracks.map((t) => t.camera));
-  const holder = state.operator;
+  syncTiles(state);
+  for (const name of statuses.keys()) if (!state.broadcasts.some((b) => b.name === name)) statuses.delete(name);
+
+  const target = driveTarget();
+  const lock = target?.locks.find((l) => l.info.id === DRIVE);
+  const holder = lock?.holder ?? null;
   const mine = holder !== null && holder === session;
-  $('claim-status').textContent = holder === null ? 'free' : mine ? 'you are driving' : `held by ${holder.slice(0, 8)}`;
+  $('claim-status').textContent = !target
+    ? 'no drive lock'
+    : holder === null
+      ? `${target.name}: free`
+      : mine
+        ? `you are driving ${target.name}`
+        : `${target.name}: held by ${who(holder)}`;
   $('claim-status').className = `pill ${mine ? 'ok' : holder ? 'warn' : ''}`;
   document.body.classList.toggle('driving', mine);
 
   const pub = $('publisher');
-  if (!p) {
-    pub.textContent = 'publisher offline';
+  if (!state.broadcasts.length) {
+    pub.textContent = 'no broadcasts';
     pub.className = 'pill bad';
   } else {
-    pub.textContent = `${p.publisher_id} · rtt ${fmt(p.rtt_ms, 1)} ms · clock ${fmt(
-      p.clock_offset_us === null ? null : p.clock_offset_us / 1000,
-      1,
-    )} ms`;
-    pub.className = 'pill ok';
+    pub.textContent = state.broadcasts
+      .map((b) =>
+        b.owner
+          ? `${b.name} · rtt ${fmt(b.rtt_ms, 1)} ms · clock ${fmt(b.clock_offset_us === null ? null : b.clock_offset_us / 1000, 1)} ms`
+          : `${b.name} offline`,
+      )
+      .join('  |  ');
+    const offline = state.broadcasts.filter((b) => !b.owner).length;
+    pub.className = `pill ${offline === 0 ? 'ok' : offline === state.broadcasts.length ? 'bad' : 'warn'}`;
   }
-  const t = p?.teleop;
-  const dm = $('deadman');
-  if (!t) {
-    dm.textContent = 'dead-man: –';
-    dm.className = 'deadman';
-  } else {
-    dm.textContent = t.deadman_tripped ? `SAFE-STOPPED: ${t.reason}` : 'ARMED';
-    dm.className = `deadman ${t.deadman_tripped ? 'tripped' : 'armed'}`;
-  }
-  const count = (r: Role) => state!.participants.filter((x) => x.role === r).length;
-  $('viewers').textContent = `${count('operator')} operator(s), ${count('viewer')} viewer(s)`;
+  renderDeadman(target);
+  const count = (k: ReturnType<typeof kind>) => state!.participants.filter((x) => kind(x) === k).length;
+  $('viewers').textContent = `${count('operator')} operator(s), ${count('viewer')} viewer(s), ${count('publisher')} publisher(s)`;
   renderVersions();
 
   const rows: string[] = [];
-  if (p?.quic) {
-    rows.push(
-      `uplink quic: rtt ${p.quic.rtt_ms.toFixed(1)} ms  cwnd ${(p.quic.cwnd / 1024).toFixed(0)} KiB  lost ${p.quic.lost_packets}/${p.quic.sent_packets}  cong ${p.quic.congestion_events}`,
-    );
-  }
-  for (const c of p?.camera_status ?? []) {
-    rows.push(
-      `${c.id}: ${c.online ? 'online' : 'OFFLINE'} ${c.codec_string ?? ''} ${c.fps.toFixed(1)} fps ${c.kbps.toFixed(0)} kbps  uplink drops ${c.dropped}  capture→pub ${fmt(c.capture_to_publisher_ms, 1)} ms`,
-    );
+  for (const b of state.broadcasts) {
+    if (b.quic) {
+      rows.push(
+        `${b.name} uplink quic: rtt ${b.quic.rtt_ms.toFixed(1)} ms  cwnd ${(b.quic.cwnd / 1024).toFixed(0)} KiB  lost ${b.quic.lost_packets}/${b.quic.sent_packets}  cong ${b.quic.congestion_events}`,
+      );
+    }
+    for (const t of b.tracks) {
+      const s = t.stats;
+      rows.push(
+        `${path(b.name, t.info.id)}: ${t.online ? 'online' : 'OFFLINE'} ${t.info.kind} ${s.codec_string ?? ''} ${s.fps.toFixed(1)} fps ${s.kbps.toFixed(0)} kbps  uplink drops ${s.dropped}  capture→pub ${fmt(s.capture_to_publisher_ms, 1)} ms  subs ${s.subscribers}`,
+      );
+    }
   }
   $('publisher-detail').textContent = rows.join('\n');
 }
@@ -200,11 +259,15 @@ function onControl(msg: Control) {
       relayBuild = msg.relay ?? null;
       log(`relay runs ${describe(relayBuild)}`);
       if (compat(relayBuild) !== 'same') log(`warning: ${mismatch('relay', relayBuild)}`);
-      $('session').textContent = `${msg.role} ${msg.session.slice(0, 8)}`;
+      $('session').textContent = `${preset} ${msg.session.slice(0, 8)}`;
+      $('session').title = msg.perms.join('\n');
       renderState();
       break;
     case 'claim_result':
-      if (!msg.ok && msg.reason) log(`claim refused: ${msg.reason}`);
+      if (!msg.ok && msg.reason) log(`claim of ${msg.lock} refused: ${msg.reason}`);
+      break;
+    case 'subscribe_result':
+      if (!msg.ok) log(`subscribe ${msg.track} refused: ${msg.reason ?? ''}`);
       break;
     case 'link_stats':
       $('link').textContent = `downlink quic: rtt ${msg.quic.rtt_ms.toFixed(1)} ms  cwnd ${(msg.quic.cwnd / 1024).toFixed(0)} KiB  lost ${msg.quic.lost_packets}/${msg.quic.sent_packets}`;
@@ -229,39 +292,39 @@ function describeEvent(e: RoomEventBody): string | null {
   switch (e.type) {
     case 'participant_joined':
       if (e.participant.session === session) return null;
-      return `${e.participant.sub} (${e.participant.session.slice(0, 8)}) joined as ${e.participant.role}`;
+      return `${e.participant.sub} (${e.participant.session.slice(0, 8)}) joined as ${kind(e.participant)}`;
     case 'participant_left':
       return `${e.participant.sub} (${e.participant.session.slice(0, 8)}) left`;
-    case 'publisher_connected':
-      return `publisher ${e.publisher_id} connected`;
-    case 'publisher_disconnected':
-      return `publisher ${e.publisher_id} ${e.reason === 'replaced' ? 'replaced by a new session' : 'disconnected'}`;
+    case 'broadcast_started':
+      return `${e.broadcast} started by ${who(e.owner)}${e.build ? ` (${e.build.component} ${e.build.version})` : ''}`;
+    case 'broadcast_stopped':
+      return `${e.broadcast} stopped: ${e.reason === 'replaced' ? 'replaced by a new session' : e.reason}`;
+    case 'broadcast_removed':
+      return `${e.broadcast} removed`;
     case 'track_published':
-      return `camera ${e.track.camera.id} published`;
-    case 'track_updated':
-      return `camera ${e.track.camera.id} changed: ${e.track.camera.codec} ${e.track.camera.width}x${e.track.camera.height}`;
+      return `${e.info.kind} track ${e.track} published`;
+    case 'track_updated': {
+      const v = e.info.video;
+      return `track ${e.track} changed${v ? `: ${v.codec} ${v.width}x${v.height}` : ''}`;
+    }
     case 'track_unpublished':
-      return `camera ${e.camera} unpublished: ${e.reason}`;
+      return `track ${e.track} unpublished`;
     case 'track_online':
-      return `camera ${e.camera} online`;
+      return `track ${e.track} online`;
     case 'track_offline':
-      return `camera ${e.camera} offline: ${e.reason}`;
-    case 'operator_changed':
+      return `track ${e.track} offline: ${e.reason}`;
+    case 'lock_changed':
       switch (e.reason) {
         case 'claimed':
-          return `${who(e.to)} took the claim`;
+          return `${who(e.to)} took ${e.lock}`;
         case 'forced':
-          return `${who(e.to)} took the claim from ${who(e.from)}`;
+          return `${who(e.to)} took ${e.lock} from ${who(e.from)}`;
         case 'released':
-          return `${who(e.from)} released the claim`;
+          return `${who(e.from)} released ${e.lock}`;
         case 'left':
-          return `claim freed: ${who(e.from)} left`;
+          return `${e.lock} freed: ${who(e.from)} left`;
       }
       return null;
-    case 'deadman_tripped':
-      return `robot safe-stopped: ${e.reason}`;
-    case 'deadman_cleared':
-      return 'robot armed';
     default:
       return null;
   }
@@ -274,6 +337,23 @@ function onRoom(msg: RoomMessage) {
   } else if (msg.type === 'event') {
     const line = describeEvent(msg.event);
     if (line) log(line);
+  }
+}
+
+// A message on a broadcast's data track: `.status` feeds the dead-man
+// display, `.events` goes to the log.
+function onData(track: Path, value: unknown) {
+  const [broadcast, name] = track.split('/') as [string, string];
+  if (name === '.status') {
+    const prev = statuses.get(broadcast)?.teleop;
+    const next = value as RobotStatus;
+    statuses.set(broadcast, next);
+    if (prev && next.teleop && prev.tripped !== next.teleop.tripped) {
+      log(next.teleop.tripped ? `${broadcast} safe-stopped: ${next.teleop.reason}` : `${broadcast} armed`);
+    }
+    renderDeadman(driveTarget());
+  } else if (name === '.events') {
+    log(`${broadcast}: ${JSON.stringify(value)}`);
   }
 }
 
@@ -294,27 +374,44 @@ function driveCommand() {
   return { throttle, steer };
 }
 
-// 20 Hz while a key is held or "stream" is on. Stopping the stream lets the
-// robot trip its dead-man after command_stale_ms, by design.
-setInterval(() => {
-  if (role !== 'operator') return;
-  const active = keys.size > 0 || streaming;
-  if (!active) return;
+function sendDrive() {
+  const target = driveTarget();
+  if (!target || !target.channels.some((c) => c.info.id === DRIVE)) return;
   const args = driveCommand();
-  send({ type: 'teleop', command: 'drive', args });
+  send({ type: 'message', channel: path(target.name, DRIVE), body: { command: 'drive', args } });
   const desc = `throttle ${args.throttle} steer ${args.steer}`;
   if (desc !== lastSent) {
     lastSent = desc;
     $('drive').textContent = desc;
   }
+}
+
+// 20 Hz while a key is held or "stream" is on. Stopping the stream lets the
+// robot trip its dead-man after the lock's message_stale_ms, by design.
+// (The relay drops drive messages from sessions that do not hold the lock.)
+setInterval(() => {
+  if (preset !== 'operator') return;
+  if (keys.size > 0 || streaming) sendDrive();
 }, 50);
+
+function lockMsg(type: 'claim' | 'release', force = false) {
+  const target = driveTarget();
+  if (!target) return log('no broadcast with a drive lock');
+  const lock = path(target.name, DRIVE);
+  send({ type: 'control', msg: type === 'claim' ? { type, lock, force } : { type, lock } });
+}
 
 function setupOperator() {
   $('operator').hidden = false;
-  $('claim').onclick = () => send({ type: 'control', msg: { type: 'claim', force: false } });
-  $('force').onclick = () => send({ type: 'control', msg: { type: 'claim', force: true } });
-  $('release').onclick = () => send({ type: 'control', msg: { type: 'release' } });
-  $('once').onclick = () => send({ type: 'teleop', command: 'ping', args: {} });
+  $('claim').onclick = () => lockMsg('claim');
+  $('force').onclick = () => lockMsg('claim', true);
+  $('release').onclick = () => lockMsg('release');
+  $('once').onclick = sendDrive;
+  $('estop').onclick = () => {
+    const target = state?.broadcasts.find((b) => b.channels.some((c) => c.info.id === ESTOP));
+    if (!target) return log('no broadcast with an estop channel');
+    send({ type: 'message', channel: path(target.name, ESTOP), body: { reason: 'console' } });
+  };
   const stream = $<HTMLInputElement>('stream');
   stream.onchange = () => (streaming = stream.checked);
   window.addEventListener('keydown', (e) => {
@@ -324,11 +421,11 @@ function setupOperator() {
       e.preventDefault();
     }
     if (k === ' ') {
-      // Emergency stop: drop the claim; the robot trips immediately.
+      // Emergency stop: drop the lock; the robot trips immediately.
       keys.clear();
       streaming = false;
       stream.checked = false;
-      send({ type: 'control', msg: { type: 'release' } });
+      lockMsg('release');
       e.preventDefault();
     }
   });
@@ -347,6 +444,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       if (msg.state !== 'connected') {
         session = null;
         state = null;
+        statuses.clear();
         renderState();
       }
       break;
@@ -356,18 +454,25 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
     case 'room':
       onRoom(msg.msg);
       break;
+    case 'data':
+      onData(msg.track, msg.value);
+      break;
     case 'stats': {
-      for (const [id, s] of Object.entries(msg.cameras)) renderCameraStats(id, s);
-      syncErrorMs = msg.clock.syncErrorMs;
-      $('clock').textContent = `relay rtt ${fmt(msg.clock.relayRttMs, 1)} ms · clock ${fmt(msg.clock.offsetMs, 1)} ms · sync ±${fmt(msg.clock.syncErrorMs, 1)} ms · ${fmt(1000 / msg.clock.refreshMs, 0)} Hz`;
+      for (const [p, s] of Object.entries(msg.cameras)) renderCameraStats(p, s);
+      $('clock').textContent = `relay rtt ${fmt(msg.clock.relayRttMs, 1)} ms · clock ${fmt(msg.clock.offsetMs, 1)} ms ±${fmt(msg.clock.errorMs, 1)} · ${fmt(1000 / msg.clock.refreshMs, 0)} Hz`;
       const t = msg.teleop;
-      if (role === 'operator') {
+      if (preset === 'operator') {
+        const target = driveTarget();
+        const status = target ? statuses.get(target.name)?.teleop : undefined;
         $('teleop-stats').textContent = [
           `ack rtt ${win(t.ackRtt)} ms   heartbeat rtt ${win(t.heartbeatRtt)} ms`,
           `acks ${Object.entries(t.acks)
             .map(([k, v]) => `${k}=${v}`)
             .join(' ') || '–'}${t.lastAckDetail ? `   last: ${t.lastAckDetail}` : ''}`,
           `robot (via heartbeat echo): ${t.tripped === null ? '–' : t.tripped ? 'tripped' : 'armed'}`,
+          status
+            ? `robot (via .status): commands ${status.commands}  last seq ${status.last_seq}  e-stops ${status.estops}`
+            : 'robot (via .status): –',
         ].join('\n');
       }
       break;
@@ -379,8 +484,8 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
 
 async function start() {
   $('title').textContent = room;
-  $('role').textContent = role;
-  if (role === 'operator') setupOperator();
+  $('role').textContent = preset;
+  if (preset === 'operator') setupOperator();
   renderVersions();
   // The relay's HTTP base: ?relay_http=, else the one baked in at build
   // time (TQ_RELAY_HTTP), else this page's origin (the relay serves it).
@@ -394,16 +499,16 @@ async function start() {
   if (compat(info.build) === 'incompatible') throw new Error(`incompatible relay: ${mismatch('relay', info.build)}`);
   let token = params.get('token');
   if (!token) {
-    const r = await fetch(new URL(`/api/dev/token?role=${role}&room=${encodeURIComponent(room)}`, relayHttp));
+    const r = await fetch(new URL(`/api/dev/token?preset=${preset}&room=${encodeURIComponent(room)}`, relayHttp));
     if (!r.ok) throw new Error(`no ?token= and the relay does not mint dev tokens (${r.status})`);
     token = ((await r.json()) as { token: string }).token;
   }
   // URL.hostname keeps the brackets around an IPv6 address.
   const host = params.get('relay') ?? `${relayHttp.hostname}:${info.quic_port}`;
-  const url = `https://${host}/v1/session/${encodeURIComponent(room)}?token=${encodeURIComponent(token)}`;
+  const url = `https://${host}/v1/room/${encodeURIComponent(room)}?token=${encodeURIComponent(token)}`;
   if (!('WebTransport' in window)) throw new Error('this browser has no WebTransport');
   if (!('VideoDecoder' in window)) throw new Error('this browser has no WebCodecs VideoDecoder');
-  send({ type: 'connect', url, certHash: info.self_signed ? info.sha256 : null, role, sensorMs });
+  send({ type: 'connect', url, certHash: info.self_signed ? info.sha256 : null, sensorMs });
 }
 
 start().catch((e) => {

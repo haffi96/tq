@@ -1,12 +1,12 @@
-// Wire format of the tq protocol. Mirrors crates/tq-proto; keep the two in
+// Wire format of the tq protocol. Mirrors crates/tq-wire; keep the two in
 // step, PROTOCOL included.
 
 export const STREAM_TYPE_GROUP = 0x01;
 /** Group stream header version (the framing, not the protocol). */
-export const VERSION = 1;
-/** The room's events stream; see crates/tq-proto/src/room.rs. */
+export const VERSION = 2;
+/** The room's events stream; see crates/tq-wire/src/room.rs. */
 export const STREAM_TYPE_EVENTS = 0x02;
-export const EVENTS_VERSION = 1;
+export const EVENTS_VERSION = 2;
 export const MAX_ROOM_MESSAGE_LEN = 1 << 20;
 
 export interface ProtocolVersion {
@@ -14,8 +14,8 @@ export interface ProtocolVersion {
   minor: number;
 }
 
-/** The protocol this build speaks; see crates/tq-proto/src/version.rs. */
-export const PROTOCOL: ProtocolVersion = { major: 2, minor: 0 };
+/** The protocol this build speaks; see crates/tq-wire/src/version.rs. */
+export const PROTOCOL: ProtocolVersion = { major: 3, minor: 0 };
 /** What a peer without build info speaks. */
 export const PROTOCOL_LEGACY: ProtocolVersion = { major: 1, minor: 0 };
 
@@ -44,24 +44,43 @@ export function mismatch(name: string, peer: BuildInfo | null | undefined): stri
   if (!peer) return `${name} predates version reporting (protocol 1.0), ${mine}`;
   return `${name} ${shortBuild(peer)} speaks protocol ${peer.protocol.major}.${peer.protocol.minor}, ${mine}`;
 }
-export const GROUP_HEADER_FIXED = 13;
+
+/** type, version, broadcast, track, group, codec_len. */
+export const GROUP_HEADER_FIXED = 1 + 1 + 2 + 2 + 8 + 1;
 export const FRAME_HEADER_LEN = 33;
 export const MAX_FRAME_LEN = 16 << 20;
 export const FLAG_KEY = 1 << 0;
 export const FLAG_CAPTURE_FROM_SEI = 1 << 1;
 
-export const DG_COMMAND = 0x10;
-export const DG_ACK = 0x11;
-export const DG_HEARTBEAT = 0x12;
-export const DG_ECHO = 0x13;
+export const DG_MESSAGE = 0x20;
+export const DG_ACK = 0x21;
+export const DG_HEARTBEAT = 0x22;
+export const DG_ECHO = 0x23;
+export const DG_TRACK_FRAME = 0x24;
+/** Bytes before a message's payload: type sid broadcast channel seq sent_us. */
+export const MESSAGE_HEADER_LEN = 1 + 4 + 2 + 2 + 4 + 8;
+/** Bytes before a track frame's payload. */
+export const TRACK_FRAME_HEADER_LEN = 1 + 2 + 2 + 4 + 1 + 8 + 8 + 8;
+/** Largest datagram a sender may write. */
+export const MAX_DATAGRAM = 1100;
+/** Echo flag: the lock's watchdog has tripped. */
+export const ECHO_TRIPPED = 1 << 0;
 
 export const ACK_STATUS = ['ok', 'superseded', 'rejected', 'malformed'] as const;
 export type AckStatus = (typeof ACK_STATUS)[number];
 
-export type Role = 'publisher' | 'operator' | 'viewer';
+/** `<broadcast>/<name>`: a track, channel or lock. */
+export type Path = string;
+export const path = (broadcast: string, name: string): Path => `${broadcast}/${name}`;
+
+/** `verb:pattern` strings, e.g. `lock:rover/drive`. */
+export type Perms = string[];
 
 export interface GroupHeader {
-  camera: number;
+  /** The room's broadcast index. */
+  broadcast: number;
+  /** Position in the broadcast's track list. */
+  track: number;
   group: bigint;
   codec: string;
 }
@@ -75,33 +94,48 @@ export interface FrameHeader {
   frameId: number;
 }
 
-export interface CameraInfo {
-  id: string;
-  label: string;
+// --- broadcasts ----------------------------------------------------------
+
+export type TrackKind = 'video' | 'data';
+export type Delivery = 'latest' | 'stream' | 'datagram';
+
+export interface VideoInfo {
+  /** `h264`, `h265`, or `auto` until the source has said. */
   codec: string;
   width: number;
   height: number;
   fps: number;
 }
 
-export interface CameraStatus {
-  id: string;
-  online: boolean;
-  codec_string: string | null;
-  frames: number;
-  groups: number;
-  fps: number;
-  kbps: number;
-  dropped: number;
-  capture_to_publisher_ms: number | null;
+export interface DataInfo {
+  encoding: string;
+  delivery: Delivery;
+  rate_hz?: number;
+  window_ms?: number;
 }
 
-export interface TeleopStatus {
-  deadman_tripped: boolean;
-  reason: string;
-  last_seq: number;
-  commands: number;
-  operator: string | null;
+export interface TrackInfo {
+  id: string;
+  kind: TrackKind;
+  label: string;
+  priority?: number;
+  video?: VideoInfo;
+  data?: DataInfo;
+  meta?: unknown;
+}
+
+export interface ChannelInfo {
+  id: string;
+  label: string;
+  lock?: string;
+  encoding: string;
+  schema?: unknown;
+}
+
+export interface LockInfo {
+  id: string;
+  label: string;
+  watchdog?: { heartbeat_loss_ms: number; message_stale_ms: number };
 }
 
 export interface QuicStats {
@@ -112,58 +146,103 @@ export interface QuicStats {
   congestion_events: number;
 }
 
-export interface PublisherStatus {
-  publisher_id: string;
-  build?: BuildInfo | null;
-  cameras: CameraInfo[];
-  camera_status: CameraStatus[];
-  teleop: TeleopStatus;
+export interface TrackStats {
+  frames: number;
+  groups: number;
+  fps: number;
+  kbps: number;
+  dropped: number;
+  capture_to_publisher_ms: number | null;
+  codec_string: string | null;
+  subscribers: number;
+}
+
+export interface TrackState {
+  /** Position in the advertisement: the `track` on group streams. */
+  index: number;
+  info: TrackInfo;
+  online: boolean;
+  stats: TrackStats;
+}
+
+export interface ChannelState {
+  index: number;
+  info: ChannelInfo;
+}
+
+export interface LockState {
+  index: number;
+  info: LockInfo;
+  /** Session holding it. */
+  holder: string | null;
+}
+
+export interface BroadcastState {
+  /** The room's index: `broadcast` on group streams and datagrams. */
+  index: number;
+  name: string;
+  /** The owning session, while connected. */
+  owner: string | null;
+  owner_sid: number | null;
+  build: BuildInfo | null;
   rtt_ms: number | null;
+  /** Owner clock minus relay clock. */
   clock_offset_us: number | null;
-  clock_error_us?: number | null;
+  clock_error_us: number | null;
   quic: QuicStats | null;
+  tracks: TrackState[];
+  channels: ChannelState[];
+  locks: LockState[];
 }
 
 export interface ParticipantInfo {
   session: string;
-  role: Role;
+  sid: number;
   sub: string;
+  perms: Perms;
   build: BuildInfo;
   joined_us: number;
 }
 
-export interface TrackInfo {
-  camera: CameraInfo;
-  online: boolean;
-}
-
 export interface RoomState {
   room_id: string;
-  publisher: PublisherStatus | null;
-  /** In announce order: a track's index is the `camera` on group streams. */
-  tracks: TrackInfo[];
+  broadcasts: BroadcastState[];
   participants: ParticipantInfo[];
-  operator: string | null;
+}
+
+/** What crates/tq-teleop publishes on a broadcast's `.status` track. */
+export interface TeleopStatus {
+  tripped: boolean;
+  reason: string;
+  holder: string | null;
+  commands: number;
+  last_seq: number;
+  estops: number;
+}
+
+export interface RobotStatus {
+  teleop?: TeleopStatus;
+  cameras?: { id: string; frames: number; codec: string | null }[];
 }
 
 export type RoomEventBody =
   | { type: 'participant_joined'; participant: ParticipantInfo }
   | { type: 'participant_left'; participant: ParticipantInfo }
-  | { type: 'publisher_connected'; publisher_id: string; build: BuildInfo | null }
-  | { type: 'publisher_disconnected'; publisher_id: string; reason: 'disconnected' | 'replaced' }
-  | { type: 'track_published'; track: TrackInfo }
-  | { type: 'track_updated'; track: TrackInfo }
-  | { type: 'track_unpublished'; camera: string; reason: string }
-  | { type: 'track_online'; camera: string }
-  | { type: 'track_offline'; camera: string; reason: string }
+  | { type: 'broadcast_started'; broadcast: string; owner: string; build: BuildInfo | null }
+  | { type: 'broadcast_stopped'; broadcast: string; reason: 'disconnected' | 'replaced' | 'unadvertised' }
+  | { type: 'broadcast_removed'; broadcast: string }
+  | { type: 'track_published'; track: Path; info: TrackInfo }
+  | { type: 'track_updated'; track: Path; info: TrackInfo }
+  | { type: 'track_unpublished'; track: Path }
+  | { type: 'track_online'; track: Path }
+  | { type: 'track_offline'; track: Path; reason: string }
   | {
-      type: 'operator_changed';
+      type: 'lock_changed';
+      lock: Path;
       from: string | null;
       to: string | null;
       reason: 'claimed' | 'forced' | 'released' | 'left';
-    }
-  | { type: 'deadman_tripped'; reason: string }
-  | { type: 'deadman_cleared' };
+    };
 
 /**
  * On the events stream: the room as of event `seq`, or the next event.
@@ -173,14 +252,23 @@ export type RoomMessage =
   | { type: 'state'; seq: number; state: RoomState }
   | { type: 'event'; seq: number; ts_us: number; event: RoomEventBody };
 
+export interface Subscription {
+  track: Path;
+  max_rate_hz?: number;
+  policy?: 'realtime' | 'smooth';
+}
+
 export type Control =
-  | { type: 'welcome'; session: string; role: Role; relay?: BuildInfo | null }
-  | { type: 'claim_result'; ok: boolean; holder: string | null; reason: string | null }
-  | { type: 'link_stats'; quic: QuicStats }
   | { type: 'hello'; build: BuildInfo }
-  | { type: 'claim'; force: boolean }
-  | { type: 'release' }
-  | { type: 'keyframe_request'; camera: string; reason: string }
+  | { type: 'welcome'; session: string; sid: number; perms: Perms; relay: BuildInfo }
+  | { type: 'subscribe'; tracks: (Path | Subscription)[] }
+  | { type: 'unsubscribe'; tracks: Path[] }
+  | { type: 'subscribe_result'; track: Path; ok: boolean; reason?: string }
+  | { type: 'keyframe_request'; track: Path; reason: string }
+  | { type: 'claim'; lock: Path; force: boolean }
+  | { type: 'release'; lock: Path }
+  | { type: 'claim_result'; lock: Path; ok: boolean; holder: string | null; reason?: string }
+  | { type: 'link_stats'; quic: QuicStats }
   | { type: 'ping'; id: number; t0_us: number }
   | { type: 'pong'; id: number; t0_us: number; t1_us: number }
   | { type: 'error'; message: string };
@@ -207,8 +295,8 @@ export function decodeGroupFixed(b: Uint8Array): { header: GroupHeader; codecLen
   const version = view.getUint8(1);
   if (version !== VERSION) throw new Error(`unsupported version ${version}`);
   return {
-    header: { camera: view.getUint16(2), group: view.getBigUint64(4), codec: '' },
-    codecLen: view.getUint8(12),
+    header: { broadcast: view.getUint16(2), track: view.getUint16(4), group: view.getBigUint64(6), codec: '' },
+    codecLen: view.getUint8(14),
   };
 }
 
@@ -243,49 +331,99 @@ export function decodeRoomMessage(json: Uint8Array): RoomMessage {
   return JSON.parse(decoder.decode(json)) as RoomMessage;
 }
 
-export function encodeCommand(seq: number, sentUs: number, body: unknown): Uint8Array {
-  const json = encoder.encode(JSON.stringify(body));
-  const out = new Uint8Array(13 + json.length);
-  const view = new DataView(out.buffer);
-  view.setUint8(0, DG_COMMAND);
-  view.setUint32(1, seq);
-  putU64(view, 5, sentUs);
-  out.set(json, 13);
+export function decodeJson(b: Uint8Array): unknown {
+  return JSON.parse(decoder.decode(b));
+}
+
+// type sid broadcast id seq time: the prefix of datagrams 0x20-0x23.
+// Clients always write sid 0; the relay fills it in.
+function route(out: Uint8Array, type: number, broadcast: number, id: number, seq: number, us: number): DataView {
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint8(0, type);
+  view.setUint32(1, 0);
+  view.setUint16(5, broadcast);
+  view.setUint16(7, id);
+  view.setUint32(9, seq);
+  putU64(view, 13, us);
+  return view;
+}
+
+/** A channel message (0x20), or null if it does not fit in a datagram. */
+export function encodeMessage(
+  broadcast: number,
+  channel: number,
+  seq: number,
+  sentUs: number,
+  payload: Uint8Array,
+): Uint8Array | null {
+  if (MESSAGE_HEADER_LEN + payload.length > MAX_DATAGRAM) return null;
+  const out = new Uint8Array(MESSAGE_HEADER_LEN + payload.length);
+  route(out, DG_MESSAGE, broadcast, channel, seq, sentUs);
+  out.set(payload, MESSAGE_HEADER_LEN);
   return out;
 }
 
-export function encodeHeartbeat(seq: number, sentUs: number): Uint8Array {
-  const out = new Uint8Array(13);
-  const view = new DataView(out.buffer);
-  view.setUint8(0, DG_HEARTBEAT);
-  view.setUint32(1, seq);
-  putU64(view, 5, sentUs);
+export function encodeJsonMessage(broadcast: number, channel: number, seq: number, sentUs: number, body: unknown) {
+  return encodeMessage(broadcast, channel, seq, sentUs, encoder.encode(JSON.stringify(body)));
+}
+
+/** A lock heartbeat (0x22). */
+export function encodeHeartbeat(broadcast: number, lock: number, seq: number, sentUs: number): Uint8Array {
+  const out = new Uint8Array(MESSAGE_HEADER_LEN);
+  route(out, DG_HEARTBEAT, broadcast, lock, seq, sentUs);
   return out;
 }
 
 export type Datagram =
-  | { type: 'ack'; seq: number; echoUs: number; status: AckStatus; detail: string }
-  | { type: 'echo'; seq: number; echoUs: number; tripped: boolean };
+  | { type: 'ack'; broadcast: number; channel: number; seq: number; echoUs: number; status: AckStatus; detail: string }
+  | { type: 'echo'; broadcast: number; lock: number; seq: number; echoUs: number; tripped: boolean }
+  | {
+      type: 'track_frame';
+      broadcast: number;
+      track: number;
+      header: FrameHeader;
+      payload: Uint8Array;
+    };
 
 export function decodeDatagram(b: Uint8Array): Datagram | null {
-  if (b.length < 13) return null;
+  if (b.length < 1) return null;
   const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
   const type = view.getUint8(0);
-  const seq = view.getUint32(1);
-  const echoUs = u64(view, 5);
-  if (type === DG_ACK && b.length >= 14) {
+  if (type === DG_TRACK_FRAME) {
+    if (b.length < TRACK_FRAME_HEADER_LEN) return null;
     return {
-      type: 'ack',
-      seq,
-      echoUs,
-      status: ACK_STATUS[view.getUint8(13)] ?? 'malformed',
-      detail: decoder.decode(b.subarray(14)),
+      type: 'track_frame',
+      broadcast: view.getUint16(1),
+      track: view.getUint16(3),
+      header: {
+        index: 0,
+        frameId: view.getUint32(5),
+        flags: view.getUint8(9),
+        captureUs: u64(view, 10),
+        publisherUs: u64(view, 18),
+        relayUs: u64(view, 26),
+      },
+      payload: b.subarray(TRACK_FRAME_HEADER_LEN),
     };
   }
-  if (type === DG_ECHO) {
-    return { type: 'echo', seq, echoUs, tripped: b.length > 13 && view.getUint8(13) !== 0 };
+  if ((type !== DG_ACK && type !== DG_ECHO) || b.length < MESSAGE_HEADER_LEN + 1) return null;
+  const broadcast = view.getUint16(5);
+  const id = view.getUint16(7);
+  const seq = view.getUint32(9);
+  const echoUs = u64(view, 13);
+  const extra = view.getUint8(MESSAGE_HEADER_LEN);
+  if (type === DG_ACK) {
+    return {
+      type: 'ack',
+      broadcast,
+      channel: id,
+      seq,
+      echoUs,
+      status: ACK_STATUS[extra] ?? 'malformed',
+      detail: decoder.decode(b.subarray(MESSAGE_HEADER_LEN + 1)),
+    };
   }
-  return null;
+  return { type: 'echo', broadcast, lock: id, seq, echoUs, tripped: (extra & ECHO_TRIPPED) !== 0 };
 }
 
 // Buffered reader over a WebTransport ReadableStream with exact reads.
