@@ -1,5 +1,6 @@
-//! The panels around the video: title bar, the sidebar with operator
-//! controls, latency and link, the events panel and the status bar. Each
+//! The panels around the board: title bar (with the remote stop), the
+//! sidebar with teleop numbers, latency and link, the events panel and the
+//! status bar. Each
 //! re-renders only when the [`Model`] changes (room states and events, key
 //! presses, the 2 Hz stats tick), never for a video frame.
 
@@ -7,7 +8,6 @@ use gpui_kit::{
     component::{
         button::{Button, ButtonVariants as _},
         h_flex,
-        switch::Switch,
         tag::Tag,
         v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeMode,
         TitleBar,
@@ -152,6 +152,18 @@ impl Render for Header {
                 .child(
                     h_flex()
                         .gap_1()
+                        .when(m.operator(), |row| {
+                            let model = model.clone();
+                            row.child(
+                                Button::new("header-stop")
+                                    .danger()
+                                    .small()
+                                    .icon(gpui_kit::assets::IconName::OctagonX)
+                                    .label("STOP")
+                                    .tooltip("Every robot in the room safe-stops, whoever drives it, until its drive lock is claimed again (Space)")
+                                    .on_click(move |_, _, cx| model.update(cx, |m, cx| m.remote_stop(cx))),
+                            )
+                        })
                         .children(update)
                         .child(toggle(
                             "toggle-bottom",
@@ -205,25 +217,11 @@ impl Render for Sidebar {
 }
 
 impl Sidebar {
+    /// The remote stop and teleop's numbers. Claiming and driving are the
+    /// layout's lock and drive widgets; the stop is not part of any layout.
     fn control(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.model.clone();
         let m = self.model.read(cx);
-        let target = m.drive_broadcast().map(|b| b.name.clone());
-        let holder = m.drive_holder();
-        let claim = match (&target, holder) {
-            (None, _) => Tag::secondary().child("Nothing to drive"),
-            (Some(_), None) => Tag::secondary().child("Free"),
-            (Some(_), Some(_)) if m.driving() => Tag::success().child("You are driving"),
-            (Some(_), Some(h)) => Tag::warning().child(format!("Held by {}", short(h))),
-        };
-        let teleop = target.as_deref().and_then(|b| m.robot_teleop(b));
-        let deadman = match &teleop {
-            None => Tag::secondary().child("Dead-man –"),
-            // The reason rides in the tag so the controls never move.
-            Some(t) if t.tripped => Tag::danger().child(format!("Safe-stopped · {}", t.reason)),
-            Some(_) => Tag::success().child("Armed"),
-        };
-        let drive = *m.shared.drive.lock().unwrap();
         let t = m.shared.teleop.lock().unwrap();
         let mut acks: Vec<_> = t.acks.iter().map(|(k, v)| format!("{k} {v}")).collect();
         acks.sort();
@@ -239,110 +237,9 @@ impl Sidebar {
         };
         let last_ack = t.last_ack_detail.clone();
         drop(t);
-        let act = |f: fn(&Model)| {
-            let model = model.clone();
-            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| f(model.read(cx))
-        };
-        let keys = m.keys.clone();
-        let streaming = m.streaming;
-        let key = |k: &'static str, label: &'static str, cx: &App| {
-            let held = keys.contains(k);
-            let t = cx.theme();
-            div()
-                .size(px(34.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .border_1()
-                .border_b_2()
-                .font_semibold()
-                .text_sm()
-                .border_color(if held { t.primary } else { t.border })
-                .bg(if held { t.primary } else { t.background })
-                .text_color(if held { t.primary_foreground } else { t.foreground })
-                .child(label)
-        };
-
         v_flex()
             .gap_3()
-            .child(section(
-                "Control",
-                target.map(|b| div().child(b).into_any_element()),
-                cx,
-            ))
-            .child(h_flex().gap_2().child(claim.small()).child(deadman.small()))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("claim")
-                            .primary()
-                            .small()
-                            .label("Claim")
-                            .on_click(act(|m| m.claim(false))),
-                    )
-                    .child(
-                        Button::new("force")
-                            .small()
-                            .label("Force claim")
-                            .on_click(act(|m| m.claim(true))),
-                    )
-                    .child(
-                        Button::new("release")
-                            .small()
-                            .outline()
-                            .label("Release")
-                            .on_click(act(|m| m.release())),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_4()
-                    .items_center()
-                    .child(
-                        v_flex().gap_1().items_center().child(key("w", "W", cx)).child(
-                            h_flex()
-                                .gap_1()
-                                .child(key("a", "A", cx))
-                                .child(key("s", "S", cx))
-                                .child(key("d", "D", cx)),
-                        ),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(kv("throttle", format!("{:+.0}", drive.throttle), cx))
-                            .child(kv("steer", format!("{:+.0}", drive.steer), cx))
-                            .child(kv("sending", if drive.active { "20 Hz" } else { "idle" }, cx)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        Switch::new("stream")
-                            .checked(streaming)
-                            .label("Stream 20 Hz")
-                            .small()
-                            .on_click({
-                                let model = model.clone();
-                                move |on: &bool, _, cx| {
-                                    let on = *on;
-                                    model.update(cx, |m, cx| {
-                                        m.streaming = on;
-                                        m.update_drive(cx);
-                                    })
-                                }
-                            }),
-                    )
-                    .child(Button::new("ping").small().ghost().label("Send ping").on_click({
-                        let model = model.clone();
-                        move |_, _, cx| model.read(cx).shared.send_drive("ping", serde_json::json!({}))
-                    })),
-            )
+            .child(section("Teleop", None, cx))
             .child(
                 Button::new("remote-stop")
                     .danger()

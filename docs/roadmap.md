@@ -39,8 +39,9 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 Updated 2026-10-31. Branch `generalize-core`, open as PR #9 against
 `main`.
 Phase 1 is done; Phase 2's Rust half is done, tq-edge and the "about 10
-lines" SDK goal included. Phase 3 has started: the web console runs on
-layouts ([layout-1.md](layout-1.md)) with a widget editor (see below). Start with [protocol-3.md](protocol-3.md) for the wire
+lines" SDK goal included. Phase 3: both consoles render layouts
+([layout-1.md](layout-1.md)); the web console also edits them (see
+below). Start with [protocol-3.md](protocol-3.md) for the wire
 format, `crates/tq/src/lib.rs` for the SDK, `crates/tq-relay/src/tests.rs`
 for worked examples of every feature, and [install.md](install.md#the-config)
 for tq-edge's config.
@@ -62,7 +63,12 @@ for tq-edge's config.
   The web console is a board of widgets: `web/src/layout.ts` (spec,
   presets, placement), `catalog.ts` (what can be bound, fields seen,
   permissions), `widgets.ts` (the types), `board.ts` (rendering,
-  subscriptions, the editor). tq-app still has its fixed teleop view.
+  subscriptions, the editor). tq-app renders the same layouts:
+  `crates/tq-app/src/layout.rs` (spec, preset, resolving; tests check the
+  preset matches the web's) and `src/ui/board.rs` (widgets as cached
+  views; the session subscribes to what they want, keeps data per track
+  and holds locks per lock). `--layout` or the settings file picks one;
+  `config/layout.example.json` is an example.
 - `dev/fake-device.ts`: stand-in device programs for
   `config/edge.full.example.json` (telemetry that follows the drive
   commands, the lights sink, the teleop sink); `dev/run-local.sh` starts
@@ -92,6 +98,12 @@ for tq-edge's config.
   switched the device's lights and shows their state from telemetry);
   dragging with push-down and float-up; a 420 px wide window; tq-probe's
   regression check alongside.
+- Phase 3 native, live with the same stack: tq-app on the preset and on
+  `config/layout.example.json`; claim, WASD (acked, speed follows, the
+  plot draws it), Space STOP (acked, lock let go, latched); the lights
+  toggle (acked, device's state read back); a bad layout file refused with
+  every problem listed. Moving the video tiles out of a cached view took
+  decoded→painted from about 9 ms to about 6 ms.
 
 **Regression check** (needs `../streaming-tools` next to this repo, or
 `STREAMING_TOOLS=…`): run `dev/run-local.sh` (or
@@ -118,11 +130,15 @@ replace. Keep all of this when touching the stop, the drive lock or
 console key handling.
 
 **Known gaps and notes:**
-- tq-app still drives only the first broadcast with a `drive` lock and
-  shows only video, `.status` and `.events`; it does not read layouts yet.
+- tq-app does not edit layouts, has no gamepad input, and does not
+  unsubscribe widgets scrolled out of view.
+- tq-app at narrow widths: 3-column widgets get cramped (the web console
+  stacks to one column under 700 px); the status bar text overlaps.
+- Widgets on the same channel share its last ack line.
 - Web: Space is STOP even in the editor's text fields (paste text with
-  spaces). Gamepad drive is in but untested with a real pad. No `map`
-  widget yet. Layouts live in `localStorage` only.
+  spaces). Gamepad drive is in but untested with a real pad (the user
+  will test it). No `map` widget yet. Layouts live in `localStorage`
+  only.
 - A killed relay does not close connections, so clients notice only at
   the QUIC idle timeout.
 - tq-app at narrow widths: the status bar text overlaps and lock badges
@@ -134,10 +150,8 @@ console key handling.
   stray connections. Drive tq-app's GUI with osascript System Events
   keystrokes (CGEvent key events do not reach it; CGEvent clicks do).
 
-**Next:** finish Phase 3 on the web (a `map` widget; layouts per room on
-the relay; a gamepad check), then tq-app renders layout 1 with GPUI
-(video surfaces redrawn on their own, cached widget views), then its
-editor. The TS client
+**Next:** the editor in tq-app (and a narrow-width mode), layouts per
+room on the relay so both consoles share them, a `map` widget. The TS client
 package, golden test vectors and a pyo3 example are lower priority and
 can come whenever.
 
@@ -274,6 +288,8 @@ path. Both apps render it.
   that follow visible widgets with merged `max_rate_hz`, batched ingest
   drawn once per frame, cost warnings and the page's own draw time, and
   every catalog v1 widget except `map`.
+- **Done in tq-app:** rendering layout 1 (every widget but `map`), the
+  same preset, `--layout`, subscriptions following the widgets.
 - **Order:** web first to settle the spec and the editor. Then tq-app renders
   the same spec with GPUI, keeping the rules that keep video fast (cached
   views, video surfaces redrawn on their own). After that, the editor comes

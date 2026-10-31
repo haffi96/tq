@@ -30,8 +30,8 @@ use moq_nvenc::{
             CUVIDPROCPARAMS,
         },
         nvcuvid::{
-            CUVIDEOFORMAT, CUVIDPARSERDISPINFO, CUVIDPARSERPARAMS, CUVIDSOURCEDATAPACKET, CUvideopacketflags,
-            CUvideoparser,
+            CUvideopacketflags, CUvideoparser, CUVIDEOFORMAT, CUVIDPARSERDISPINFO, CUVIDPARSERPARAMS,
+            CUVIDSOURCEDATAPACKET,
         },
     },
 };
@@ -163,7 +163,10 @@ impl Parser {
             pfnDisplayPicture: Some(on_display),
             ..Default::default()
         };
-        state.ctx.bind_to_thread().map_err(|e| anyhow::anyhow!("CUDA bind: {e:?}"))?;
+        state
+            .ctx
+            .bind_to_thread()
+            .map_err(|e| anyhow::anyhow!("CUDA bind: {e:?}"))?;
         let mut handle: CUvideoparser = ptr::null_mut();
         let status = unsafe { (api.create_video_parser)(&mut handle, &mut params) };
         if status != CUresult::CUDA_SUCCESS {
@@ -310,8 +313,9 @@ impl State {
         };
         let mut dev_ptr: c_ulonglong = 0;
         let mut pitch: c_uint = 0;
-        let status =
-            unsafe { (self.api.map_video_frame)(d.handle, disp.picture_index, &mut dev_ptr, &mut pitch, &mut proc_params) };
+        let status = unsafe {
+            (self.api.map_video_frame)(d.handle, disp.picture_index, &mut dev_ptr, &mut pitch, &mut proc_params)
+        };
         if status != CUresult::CUDA_SUCCESS {
             bail!("cuvidMapVideoFrame: {status:?}");
         }

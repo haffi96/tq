@@ -1,13 +1,16 @@
-//! The window: a dock console. Title bar on top, the video grid in the
-//! middle with the events panel under it, a resizable sidebar with the
-//! operator controls, latency and link on the right, a status bar below.
+//! The window: a dock console. Title bar on top (with the remote stop),
+//! the board (the layout's widgets, [`board`]) in the middle with the
+//! events panel under it, a resizable sidebar with latency and link on the
+//! right, a status bar below.
 //!
-//! Every part is a cached view. A decoded picture notifies only its tile,
-//! so a video frame re-renders one tile and replays the rest; the panels
-//! re-render on control messages, key presses and the stats tick. A cached
-//! view is laid out from the style it is given, not from its content, so
-//! each one gets a definite size.
+//! Every part is a cached view. A decoded picture notifies only its video
+//! widgets, so a video frame re-renders one tile and replays the rest; data
+//! notifies only the widgets bound to it; the panels re-render on control
+//! messages, key presses and the stats tick. A cached view is laid out from
+//! the style it is given, not from its content, so each one gets a definite
+//! size.
 
+mod board;
 mod model;
 mod panels;
 mod tile;
@@ -28,8 +31,9 @@ use gpui_kit::{
     px, AnyView, Context, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, StyleRefinement, Window,
 };
 
-use self::{model::Model, panels::*, tile::Grid};
+use self::{board::Board, model::Model, panels::*};
 use crate::{
+    layout::Layout,
     session::{Event, Shared},
     update,
 };
@@ -40,7 +44,7 @@ pub struct AppView {
     focus: FocusHandle,
     model: Entity<Model>,
     header: Entity<Header>,
-    grid: Entity<Grid>,
+    board: Entity<Board>,
     sidebar: Entity<Sidebar>,
     events: Entity<Events>,
     status: Entity<Status>,
@@ -54,17 +58,18 @@ impl AppView {
         shared: Arc<Shared>,
         mut events: UnboundedReceiver<Event>,
         updates: update::Settings,
+        layout: Option<Layout>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let model = cx.new(|_| Model::new(shared, updates));
+        let model = cx.new(|_| Model::new(shared, updates, layout));
         model.update(cx, |m, cx| m.check_update(cx));
         let view = Self {
             focus,
             header: cx.new(|cx| Header::new(model.clone(), cx)),
-            grid: cx.new(|cx| Grid::new(model.clone(), cx)),
+            board: cx.new(|cx| Board::new(model.clone(), cx)),
             sidebar: cx.new(|cx| Sidebar::new(model.clone(), cx)),
             events: cx.new(|cx| Events::new(model.clone(), cx)),
             status: cx.new(|cx| Status::new(model.clone(), cx)),
@@ -78,7 +83,11 @@ impl AppView {
                 let ok = this.update(cx, |view, cx| match event {
                     Event::Frame => {
                         view.model.read(cx).shared.frame_taken();
-                        view.grid.update(cx, |g, cx| g.on_frame(cx));
+                        view.board.update(cx, |b, cx| b.on_frame(cx));
+                    }
+                    Event::Data => {
+                        view.model.read(cx).shared.data_taken();
+                        view.board.update(cx, |b, cx| b.on_data(cx));
                     }
                     event => view.model.update(cx, |m, cx| m.on_event(event, cx)),
                 });
@@ -192,7 +201,7 @@ impl Render for AppView {
                         .child(
                             resizable_panel().child(
                                 v_resizable("center")
-                                    .child(resizable_panel().child(self.grid.clone()))
+                                    .child(resizable_panel().child(self.board.clone()))
                                     .child(
                                         resizable_panel()
                                             .size(px(160.))

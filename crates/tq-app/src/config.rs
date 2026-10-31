@@ -29,6 +29,8 @@ pub struct File {
     pub preset: Option<String>,
     pub token: Option<String>,
     pub secret: Option<String>,
+    /// A layout file (docs/layout-1.md).
+    pub layout: Option<PathBuf>,
     #[serde(default)]
     pub update: Update,
 }

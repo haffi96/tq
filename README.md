@@ -152,13 +152,20 @@ gpui-kit pins a `gpui-pre` snapshot that needs Rust 1.95 or newer:
 rustup update stable                  # or: rustup toolchain install 1.95, then cargo +1.95 …
 cargo run --release -p tq-app -- --preset operator      # or --preset viewer
 cargo run --release -p tq-app -- --preset viewer --log-stats   # also log per-track numbers
+cargo run --release -p tq-app -- --preset operator --layout config/layout.example.json
 ```
 
 The window is a dock console:
-- The camera grid is in the middle, with a latency chip on each tile.
-- The events panel is underneath.
-- A resizable sidebar holds the operator controls, glass latency with a 60 s
-  sparkline per camera, and the link.
+- The board is in the middle: the widgets of a layout
+  ([docs/layout-1.md](docs/layout-1.md)), the same documents the web
+  console shows. `--layout` (or `layout` in the settings file) picks one;
+  without it the app makes the same preset as the web console. Video tiles
+  have a latency chip each.
+- The remote stop (STOP, or Space) is in the title bar, outside any layout.
+- The events panel (with a table of every track) is underneath, closed at
+  first.
+- A resizable sidebar, closed at first, holds teleop numbers, glass latency
+  with a 60 s sparkline per camera, and the link.
 - A status bar is at the bottom.
 
 The title bar toggles the panels and switches between light and dark. The
@@ -166,11 +173,14 @@ app follows the system appearance until you switch.
 
 Video frames do not redraw the rest of the window. Every part is a cached
 view. A decoded picture notifies only its camera's `Video` view (the
-surface alone). The chips over it (`Hud`) and the panels redraw with the
-2 Hz stats tick, control messages and key presses. Two rules keep it so:
+surface alone). A data track's messages notify only the widgets bound to
+it. The chips over the video (`Hud`), the other widgets and the panels
+redraw with the 2 Hz stats tick, control messages and key presses. Two
+rules keep it so:
 - A cached view is sized by the style it is given, not by its content.
 - gpui re-renders every cached view inside a cached view that re-renders.
-  So the path from the root to the video, through the grid, stays uncached.
+  So the path from the root to the video, through the board, stays
+  uncached: the board places each tile's `Video` and `Hud` itself.
 
 The status bar shows the UI's own cost per frame, from render start to the
 last element painted. `RUST_LOG=tq_app::frame=trace` logs it for every

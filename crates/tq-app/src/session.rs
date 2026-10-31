@@ -2,14 +2,16 @@
 //! tq client SDK ([`tq::Session`]).
 //!
 //! Runs on a tokio runtime next to the UI. It connects (and reconnects) to
-//! the relay, follows the room, subscribes to every broadcast's video
-//! tracks (each into its own decoder thread, [`crate::feed`]) and to their
-//! `.status` and `.events` data tracks, and drives the `drive` lock and
-//! channel of the broadcast being driven. The UI hears about connection,
-//! room and teleop changes through [`Event`]s and acts through [`Shared`].
+//! the relay, follows the room, and subscribes to what the layout's widgets
+//! want ([`Shared::set_wants`]): video tracks into their own decoder
+//! threads ([`crate::feed`]), data tracks into [`Shared::data`]. Every
+//! broadcast's `.status` and `.events` are always subscribed. It holds the
+//! locks the user claims and drives the drive widgets' channels. The UI
+//! hears about connection, room and teleop changes through [`Event`]s and
+//! acts through [`Shared`].
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{atomic::AtomicBool, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -18,7 +20,9 @@ use anyhow::Context;
 use futures::channel::mpsc::UnboundedSender;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tq::{Client, Conn, Hold, Reply, Session, Token};
-use tq_wire::{BroadcastState, BuildInfo, Control, Path, Perms, RoomEvent, RoomState, TrackInfo, TrackKind};
+use tq_wire::{
+    BroadcastState, BuildInfo, Control, Path, Perms, RoomEvent, RoomState, Subscription, TrackInfo, TrackKind,
+};
 
 use crate::{
     feed::{Feed, Job},
@@ -26,7 +30,10 @@ use crate::{
 };
 
 const HEARTBEAT: Duration = Duration::from_millis(100);
-const TELEOP: Duration = Duration::from_millis(50);
+/// Drive widgets send at their own rate; this is the finest step.
+const TELEOP_TICK: Duration = Duration::from_millis(10);
+/// Messages kept per data track (plots draw from them).
+const DATA_RING: usize = 4096;
 /// How long a replayed `.events` message waits for the clock offsets.
 const CLOCK_WAIT: Duration = Duration::from_secs(1);
 
@@ -101,9 +108,12 @@ pub enum Event {
     LogAt(u64, String),
     /// A feed got a new picture (coalesced: at most one pending).
     Frame,
+    /// New data track messages or acks (coalesced like `Frame`).
+    Data,
 }
 
-/// What the operator is asking for; sent at 20 Hz while `active`.
+/// What the operator is asking for; each drive widget sends it while
+/// `active` and its lock is held.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Drive {
     pub throttle: f64,
@@ -121,6 +131,32 @@ pub struct Teleop {
     pub tripped: Option<bool>,
 }
 
+/// A data track's recent messages: (capture time on this machine's clock
+/// in Unix ms, message), oldest first.
+#[derive(Default)]
+pub struct TrackData {
+    pub ring: VecDeque<(f64, Arc<serde_json::Value>)>,
+    /// Bumped for each message.
+    pub seq: u64,
+}
+
+/// The last ack of a channel.
+#[derive(Debug, Clone)]
+pub struct Ack {
+    pub status: tq_wire::AckStatus,
+    pub detail: String,
+    pub rtt_ms: f64,
+}
+
+/// A drive widget: where its commands go and how often.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DriveTarget {
+    pub channel: Path,
+    pub lock: Path,
+    pub rate_hz: f64,
+    pub command: String,
+}
+
 /// State shared by the session, the decoder threads and the UI.
 pub struct Shared {
     pub config: Config,
@@ -129,12 +165,22 @@ pub struct Shared {
     /// One feed per video track, in the order they appeared. Kept across
     /// reconnects so the UI tiles stay put.
     pub feeds: Mutex<Vec<Arc<Feed>>>,
+    /// Messages of subscribed JSON data tracks.
+    pub data: Mutex<HashMap<Path, TrackData>>,
+    /// Each channel's last ack.
+    pub acks: Mutex<HashMap<Path, Ack>>,
+    /// Bumped for each ack.
+    pub ack_seq: std::sync::atomic::AtomicU64,
+    pub drive_targets: Mutex<Vec<DriveTarget>>,
     client: Client,
-    /// The drive lock, while this app holds it.
-    hold: Mutex<Option<Hold>>,
+    /// Locks this app holds.
+    holds: Mutex<HashMap<Path, Hold>>,
+    /// What the widgets are bound to.
+    wants: tokio::sync::watch::Sender<Vec<Subscription>>,
     rt: tokio::runtime::Handle,
     events: UnboundedSender<Event>,
     frame_pending: AtomicBool,
+    data_pending: AtomicBool,
 }
 
 /// The broadcast an operator drives: the first with a `drive` lock.
@@ -170,6 +216,54 @@ impl Shared {
         self.frame_pending.store(false, std::sync::atomic::Ordering::Release);
     }
 
+    /// Wakes the UI for new data or acks, coalesced like [`Self::frame_ready`].
+    fn data_ready(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.data_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.events.unbounded_send(Event::Data);
+        }
+    }
+
+    pub fn data_taken(&self) {
+        self.data_pending.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The tracks the widgets are bound to; replaces the previous list.
+    pub fn set_wants(&self, subs: Vec<Subscription>) {
+        self.wants.send_if_modified(|w| {
+            let changed = *w != subs;
+            *w = subs;
+            changed
+        });
+    }
+
+    /// The session's permissions, while connected.
+    pub fn perms(&self) -> Option<Perms> {
+        Some(self.session()?.perms().clone())
+    }
+
+    /// Whether this app holds `lock`.
+    pub fn holds(&self, lock: &Path) -> bool {
+        self.holds.lock().unwrap().get(lock).is_some_and(|h| h.is_held())
+    }
+
+    /// Whether this app holds any lock.
+    pub fn holds_any(&self) -> bool {
+        self.holds.lock().unwrap().values().any(|h| h.is_held())
+    }
+
+    /// One JSON message on a channel (a button, toggle or slider). Its ack
+    /// shows in [`Self::acks`].
+    pub fn send(&self, channel: &Path, body: &serde_json::Value) {
+        let Some(session) = self.session() else {
+            self.event(Event::Log("Not connected".into()));
+            return;
+        };
+        if let Err(e) = session.channel(channel.clone()).send_json(body) {
+            self.event(Event::Log(format!("Send on {channel}: {e:#}")));
+        }
+    }
+
     pub fn session(&self) -> Option<Session> {
         self.client.session()
     }
@@ -201,14 +295,15 @@ impl Shared {
             .max_by(f64::total_cmp)
     }
 
-    /// Claims the drive lock (taking it from its holder with `force`) and
+    /// Claims `lock` (taking it from its holder with `force`) and
     /// heartbeats it while held. Claiming it while holding it claims it
     /// anew, which re-arms a robot after a remote stop.
-    pub fn claim(self: &Arc<Self>, force: bool) {
-        let Some((session, lock)) = self.drive_target() else {
+    pub fn claim(self: &Arc<Self>, lock: Path, force: bool) {
+        let Some(session) = self.session() else {
+            self.event(Event::Log("Not connected".into()));
             return;
         };
-        let previous = self.hold.lock().unwrap().take();
+        let previous = self.holds.lock().unwrap().remove(&lock);
         let shared = self.clone();
         self.rt.spawn(async move {
             if let Some(h) = previous.filter(|h| h.is_held()) {
@@ -216,22 +311,22 @@ impl Shared {
             }
             let line = match session.hold(lock.clone(), force, HEARTBEAT).await {
                 Ok(Ok(hold)) => {
-                    *shared.hold.lock().unwrap() = Some(hold);
-                    format!("Claim granted: you are driving {}", lock.broadcast)
+                    shared.holds.lock().unwrap().insert(lock.clone(), hold);
+                    format!("Claim granted: you hold {lock}")
                 }
-                Ok(Err(refused)) => format!("Claim refused: {}", refused.reason),
-                Err(e) => format!("Claim failed: {e:#}"),
+                Ok(Err(refused)) => format!("Claim of {lock} refused: {}", refused.reason),
+                Err(e) => format!("Claim of {lock} failed: {e:#}"),
             };
             shared.event(Event::Log(line));
         });
     }
 
-    /// Releases the drive lock; the robot's dead-man trips at once.
-    pub fn release(self: &Arc<Self>) {
-        let Some((session, lock)) = self.drive_target() else {
+    /// Releases `lock`; a robot's dead-man trips at once.
+    pub fn release(self: &Arc<Self>, lock: Path) {
+        let Some(session) = self.session() else {
             return;
         };
-        let hold = self.hold.lock().unwrap().take();
+        let hold = self.holds.lock().unwrap().remove(&lock);
         let shared = self.clone();
         self.rt.spawn(async move {
             let r = match hold {
@@ -246,7 +341,7 @@ impl Shared {
 
     /// Remote stop: every robot in the room safe-stops, whoever drives it, and
     /// stays stopped until its drive lock is claimed again. This app lets
-    /// go of its own drive lock too.
+    /// go of every lock it holds too.
     pub fn remote_stop(self: &Arc<Self>) {
         let targets: Vec<Path> = self
             .client
@@ -263,37 +358,11 @@ impl Shared {
         for channel in targets {
             self.rt.spawn(send_remote_stop(self.clone(), channel));
         }
-        if let Some(hold) = self.hold.lock().unwrap().take() {
+        let holds: Vec<Hold> = self.holds.lock().unwrap().drain().map(|(_, h)| h).collect();
+        for hold in holds {
             self.rt.spawn(async move {
                 let _ = hold.release().await;
             });
-        }
-    }
-
-    /// One message on the drive channel, outside the 20 Hz stream.
-    pub fn send_drive(&self, command: &str, args: serde_json::Value) {
-        let Some((session, lock)) = self.drive_target() else {
-            return;
-        };
-        let msg = serde_json::json!({ "command": command, "args": args });
-        if let Err(e) = session.channel(lock).send_json(&msg) {
-            self.event(Event::Log(format!("Send {command}: {e:#}")));
-        }
-    }
-
-    /// The session and the drive lock, or why not (logged).
-    fn drive_target(&self) -> Option<(Session, Path)> {
-        let Some(session) = self.session() else {
-            self.event(Event::Log("Not connected".into()));
-            return None;
-        };
-        let lock = drive_broadcast(&session.room().borrow()).map(|b| Path::new(&b.name, DRIVE));
-        match lock {
-            Some(lock) => Some((session, lock)),
-            None => {
-                self.event(Event::Log("Nothing to drive: no broadcast has a drive lock".into()));
-                None
-            }
         }
     }
 
@@ -325,11 +394,17 @@ pub fn start(rt: &tokio::runtime::Runtime, config: Config, events: UnboundedSend
         teleop: Mutex::default(),
         drive: Mutex::default(),
         feeds: Mutex::default(),
+        data: Mutex::default(),
+        acks: Mutex::default(),
+        ack_seq: Default::default(),
+        drive_targets: Mutex::default(),
         client: client.clone(),
-        hold: Mutex::default(),
+        holds: Mutex::default(),
+        wants: tokio::sync::watch::Sender::new(Vec::new()),
         rt: rt.handle().clone(),
         events,
         frame_pending: Default::default(),
+        data_pending: Default::default(),
     });
     rt.spawn(follow_conn(shared.clone(), client.conn()));
     rt.spawn(follow_room(shared.clone(), client.clone()));
@@ -418,59 +493,93 @@ enum Sub {
     Video(Arc<Feed>),
     Status,
     Events,
+    Data,
 }
 
-/// Subscription tasks by track; aborted (so unsubscribed) when dropped.
+/// Subscription tasks by track, with the options they were made with;
+/// aborted (so unsubscribed) when dropped.
 #[derive(Default)]
-struct Subs(HashMap<Path, tokio::task::JoinHandle<()>>);
+struct Subs(HashMap<Path, (Subscription, tokio::task::JoinHandle<()>)>);
 
 impl Drop for Subs {
     fn drop(&mut self) {
-        for h in self.0.values() {
+        for (_, h) in self.0.values() {
             h.abort();
         }
     }
 }
 
-/// Follows the room's state: passes it to the UI and keeps one
-/// subscription per video, `.status` and `.events` track. Subscriptions
-/// are the client's, so they carry on across reconnects.
+/// Follows the room's state and the widgets' wants: passes the state to
+/// the UI and keeps one subscription per wanted track in the room (with
+/// the options asked for), plus every `.status` and `.events`.
+/// Subscriptions are the client's, so they carry on across reconnects.
 async fn follow_room(shared: Arc<Shared>, client: Client) {
     let mut room = client.room();
+    let mut wants = shared.wants.subscribe();
     let mut subs = Subs::default();
     loop {
         let state = room.borrow_and_update().clone();
+        let want: HashMap<Path, Subscription> = wants
+            .borrow_and_update()
+            .iter()
+            .map(|s| (s.track.clone(), s.clone()))
+            .collect();
         let mut wanted = HashSet::new();
         for b in &state.broadcasts {
             for t in &b.tracks {
                 let path = Path::new(&b.name, &t.info.id);
-                let sub = match (t.info.kind, t.info.id.as_str()) {
-                    (TrackKind::Video, _) => Sub::Video(shared.feed_for(&path, track_label(&b.name, &t.info))),
-                    (TrackKind::Data, STATUS) => Sub::Status,
-                    (TrackKind::Data, EVENTS) => Sub::Events,
-                    _ => continue,
+                let (sub, opts) = match (t.info.kind, t.info.id.as_str()) {
+                    (TrackKind::Data, STATUS) => (Sub::Status, Subscription::new(path.clone())),
+                    (TrackKind::Data, EVENTS) => (Sub::Events, Subscription::new(path.clone())),
+                    (kind, _) => match want.get(&path) {
+                        Some(opts) if kind == TrackKind::Video => (
+                            Sub::Video(shared.feed_for(&path, track_label(&b.name, &t.info))),
+                            opts.clone(),
+                        ),
+                        Some(opts) => (Sub::Data, opts.clone()),
+                        None => continue,
+                    },
                 };
                 wanted.insert(path.clone());
-                if subs.0.contains_key(&path) {
+                if subs.0.get(&path).is_some_and(|(o, _)| *o == opts) {
                     continue;
                 }
-                let reader = client.subscribe(path.clone());
+                // New, or new options: a new reader replaces the old one.
+                if let Some((_, old)) = subs.0.remove(&path) {
+                    old.abort();
+                }
+                let reader = client.subscribe(opts.clone());
                 let task = read_track(shared.clone(), reader, sub);
-                subs.0.insert(path, tokio::spawn(task));
+                subs.0.insert(path, (opts, tokio::spawn(task)));
             }
         }
-        subs.0.retain(|p, h| {
+        subs.0.retain(|p, (_, h)| {
             let keep = wanted.contains(p);
             if !keep {
                 h.abort();
             }
             keep
         });
+        shared.data.lock().unwrap().retain(|p, _| wanted.contains(p));
         shared.event(Event::Room(state));
-        if room.changed().await.is_err() {
-            return;
+        tokio::select! {
+            r = room.changed() => if r.is_err() { return },
+            r = wants.changed() => if r.is_err() { return },
         }
     }
+}
+
+/// Keeps a data track message for the widgets.
+fn store(shared: &Shared, path: &Path, at_us: u64, value: serde_json::Value) {
+    let mut data = shared.data.lock().unwrap();
+    let d = data.entry(path.clone()).or_default();
+    if d.ring.len() == DATA_RING {
+        d.ring.pop_front();
+    }
+    d.ring.push_back((at_us as f64 / 1000.0, Arc::new(value)));
+    d.seq += 1;
+    drop(data);
+    shared.data_ready();
 }
 
 async fn read_track(shared: Arc<Shared>, mut reader: tq::Reader, sub: Sub) {
@@ -493,8 +602,15 @@ async fn read_track(shared: Arc<Shared>, mut reader: tq::Reader, sub: Sub) {
                 });
             }
             Sub::Status => match f.json::<serde_json::Value>() {
-                Ok(v) => shared.event(Event::BroadcastStatus(path.broadcast.clone(), v)),
+                Ok(v) => {
+                    store(&shared, &path, f.capture_local_us().unwrap_or(f.recv_us), v.clone());
+                    shared.event(Event::BroadcastStatus(path.broadcast.clone(), v))
+                }
                 Err(e) => tracing::debug!(track = %path, "bad status: {e}"),
+            },
+            Sub::Data => match f.json::<serde_json::Value>() {
+                Ok(v) => store(&shared, &path, f.capture_local_us().unwrap_or(f.recv_us), v),
+                Err(e) => tracing::debug!(track = %path, "not JSON: {e}"),
             },
             Sub::Events => match f.json::<serde_json::Value>() {
                 Ok(v) => {
@@ -551,8 +667,22 @@ async fn read_replies(shared: Arc<Shared>, mut rx: broadcast::Receiver<Reply>) {
         let mut t = shared.teleop.lock().unwrap();
         match r {
             Reply::Ack {
-                rtt_us, status, detail, ..
+                rtt_us,
+                status,
+                detail,
+                channel,
+                ..
             } => {
+                shared.acks.lock().unwrap().insert(
+                    channel,
+                    Ack {
+                        status,
+                        detail: detail.clone(),
+                        rtt_ms: rtt_us as f64 / 1000.0,
+                    },
+                );
+                shared.ack_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                shared.data_ready();
                 t.ack_rtt.add(rtt_us as f64 / 1000.0);
                 *t.acks.entry(format!("{status:?}").to_lowercase()).or_default() += 1;
                 if !detail.is_empty() {
@@ -607,10 +737,13 @@ async fn send_remote_stop(shared: Arc<Shared>, channel: Path) {
     }
 }
 
-/// Drive commands on the drive channel, 20 Hz while active. Stopping lets
-/// the robot's watchdog trip, by design. (Heartbeats are the [`Hold`]'s.)
+/// Drive commands from each drive widget, at its rate, while the
+/// operator's input is active and this app holds the widget's lock.
+/// Stopping lets the robot's watchdog trip, by design. (Heartbeats are the
+/// [`Hold`]'s.)
 async fn send_teleop(shared: Arc<Shared>) {
-    let mut tick = tokio::time::interval(TELEOP);
+    let mut tick = tokio::time::interval(TELEOP_TICK);
+    let mut last: HashMap<Path, Instant> = HashMap::new();
     loop {
         tick.tick().await;
         let drive = *shared.drive.lock().unwrap();
@@ -620,13 +753,25 @@ async fn send_teleop(shared: Arc<Shared>) {
         let Some(session) = shared.session() else {
             continue;
         };
-        let Some(lock) = drive_broadcast(&session.room().borrow()).map(|b| Path::new(&b.name, DRIVE)) else {
-            continue;
-        };
-        let msg = serde_json::json!({
-            "command": "drive",
-            "args": { "throttle": drive.throttle, "steer": drive.steer },
-        });
-        let _ = session.channel(lock).send_json(&msg);
+        let targets = shared.drive_targets.lock().unwrap().clone();
+        for t in targets {
+            if !shared.holds(&t.lock) {
+                continue;
+            }
+            let period = Duration::from_secs_f64(1.0 / t.rate_hz.clamp(1.0, 100.0));
+            // Within half a tick of due counts as due, so 20 Hz stays 20 Hz.
+            if last
+                .get(&t.channel)
+                .is_some_and(|at| at.elapsed() + TELEOP_TICK / 2 < period)
+            {
+                continue;
+            }
+            last.insert(t.channel.clone(), Instant::now());
+            let msg = serde_json::json!({
+                "command": t.command,
+                "args": { "throttle": drive.throttle, "steer": drive.steer },
+            });
+            let _ = session.channel(t.channel).send_json(&msg);
+        }
     }
 }

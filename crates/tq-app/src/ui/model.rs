@@ -15,6 +15,7 @@ use tq_wire::{
 
 use crate::{
     feed::Stats,
+    layout::{self, Layout},
     session::{self, ConnState, Drive, Event, Shared},
     stats::Window as Win,
     update,
@@ -67,6 +68,13 @@ pub struct Model {
     owners_seen: HashMap<String, String>,
     pub updates: update::Settings,
     pub update: UpdateState,
+    /// What the board shows: the given layout, or the preset made from
+    /// the room.
+    pub layout: Arc<Layout>,
+    /// Given (`--layout`): never replaced by the preset.
+    pub layout_given: bool,
+    /// Bumped when `layout` changes.
+    pub layout_version: u64,
     ticks: u64,
 }
 
@@ -96,8 +104,12 @@ pub fn kind_of(perms: &Perms) -> &'static str {
 }
 
 impl Model {
-    pub fn new(shared: Arc<Shared>, updates: update::Settings) -> Self {
+    pub fn new(shared: Arc<Shared>, updates: update::Settings, layout: Option<Layout>) -> Self {
+        let layout_given = layout.is_some();
         Self {
+            layout: Arc::new(layout.unwrap_or_else(|| layout::preset(&RoomState::default(), false))),
+            layout_given,
+            layout_version: 0,
             shared,
             conn: (ConnState::Connecting, None),
             session: None,
@@ -108,8 +120,10 @@ impl Model {
             frame_cost: Default::default(),
             keys: BTreeSet::new(),
             streaming: false,
-            sidebar: true,
-            bottom: true,
+            // The board has latency and status; the sidebar is one click away.
+            sidebar: false,
+            // The preset has a log widget; the panel has the tracks table.
+            bottom: false,
             log: Vec::new(),
             history: HashMap::new(),
             rtt_history: VecDeque::new(),
@@ -134,15 +148,9 @@ impl Model {
             .or_else(|| self.state.as_ref()?.broadcasts.first())
     }
 
-    /// Session holding the drive lock.
-    pub fn drive_holder(&self) -> Option<&str> {
-        self.drive_broadcast()?.lock(session::DRIVE)?.holder.as_deref()
-    }
-
-    /// This session holds the drive lock.
+    /// This app holds a lock (an update's restart would drop it).
     pub fn driving(&self) -> bool {
-        let holder = self.drive_holder();
-        holder.is_some() && holder == self.session.as_deref()
+        self.shared.holds_any()
     }
 
     /// Teleop's state on a broadcast, from its `.status`.
@@ -281,7 +289,7 @@ impl Model {
     /// Everything but [`Event::Frame`], which goes to the tiles.
     pub fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Frame => return,
+            Event::Frame | Event::Data => return,
             Event::Status(state, detail) => {
                 if state != ConnState::Connected {
                     // The next session starts with a fresh state.
@@ -311,6 +319,13 @@ impl Model {
             Event::Room(state) => {
                 // Statuses of broadcasts that went away go with them.
                 self.statuses.retain(|b, _| state.broadcast(b).is_some());
+                if !self.layout_given {
+                    let preset = layout::preset(&state, self.operator());
+                    if preset != *self.layout {
+                        self.layout = Arc::new(preset);
+                        self.layout_version += 1;
+                    }
+                }
                 self.state = Some(state);
                 self.note_owners();
             }
@@ -430,14 +445,6 @@ impl Model {
     }
 
     // --- teleop ---------------------------------------------------------
-
-    pub fn claim(&self, force: bool) {
-        self.shared.claim(force);
-    }
-
-    pub fn release(&self) {
-        self.shared.release();
-    }
 
     pub fn update_drive(&mut self, cx: &mut Context<Self>) {
         let k = |c| self.keys.contains(c) as i32 as f64;

@@ -1,10 +1,11 @@
 # Layout spec 1
 
 A **layout** is a JSON document: a grid of widgets, each bound to the room's
-data by path. The web console renders it today; tq-app (GPUI) is to render
-the same documents. `web/src/layout.ts` validates it and
-`web/src/widgets.ts` defines the widget types. Keep this file in step with
-them.
+data by path. The web console and tq-app (GPUI) both render it. Keep this
+file in step with `web/src/layout.ts` and `web/src/widgets.ts`, and with
+`crates/tq-app/src/layout.rs` and `crates/tq-app/src/ui/board.rs`. Their
+tests check that both make the same preset. `config/layout.example.json`
+is a teleop layout with telemetry for `config/edge.full.example.json`.
 
 ```json
 {
@@ -57,7 +58,7 @@ A bare id resolves against the widget's `bind.broadcast`, then the layout's
 | `button` | `channel` | `label`, `message` (`{}`) | on click |
 | `toggle` | `channel`; optional `track` + `path` for the device's own state | `label`, `field` (the channel schema's one `bool`, else `on`) | on change |
 | `slider` | `channel` | `label`, `field` (the schema's one `number`, else `value`), `min` (0), `max` (1), `step` (0.01), `rate_hz` (10) | on input |
-| `drive` | `channel`, `lock` | `rate_hz` (20), `input`: `both`, `keyboard`, `gamepad`, `command` (`drive`) | at its send rate |
+| `drive` | `channel`, `lock` | `rate_hz` (20), `input`: `both`, `keyboard`, `gamepad` (web only for now), `command` (`drive`) | at its send rate |
 | `lock` | `lock` | | on change |
 | `status` | `broadcast` | | on change; its `.status` (dead-man, counters) |
 | `log` | | | on new lines: room events, `.events`, remote stop results |
@@ -72,13 +73,18 @@ A bare id resolves against the widget's `bind.broadcast`, then the layout's
   the highest rate asked for. A widget scrolled out of view, or a hidden
   tab, unsubscribes. `.status` and `.events` are always subscribed.
 - **Ingest rate is not render rate.** Messages are taken at their arrival
-  rate and drawn at most once per display frame (the web worker batches
+  rate and drawn at most once per display frame. The web worker batches
   them to the page at most every 8 ms; widgets mark themselves dirty and
-  draw on the next animation frame).
-- **Video has a protected path.** Frames are decoded and drawn by the media
-  worker straight onto each video widget's canvas; nothing a widget does
-  on the page can delay one. The app shows its own main-thread draw time
-  per frame (`ui … ms/frame`).
+  draw on the next animation frame. tq-app keeps each track's last 4096
+  messages; a coalesced wake-up notifies only the widgets bound to tracks
+  with new ones, and GPUI renders a notified view once per frame.
+- **Video has a protected path.** On the web, frames are decoded and drawn
+  by the media worker straight onto each video widget's canvas; nothing a
+  widget does on the page can delay one. In tq-app, a decoded picture
+  re-renders only its tile's picture view, and the path from the root to
+  it has no cached views (which would re-render everything inside them).
+  Both apps show their own draw time per frame (`ui … ms/frame`, `UI
+  frame … ms`).
 - **Costs are visible.** The editor shows each type's cost, counts video
   decodes and draws, and flags what is expensive or wrong: the same video
   in several widgets, more than four videos at full rate, a plot on a fast
@@ -94,6 +100,11 @@ A bare id resolves against the widget's `bind.broadcast`, then the layout's
   STOP even inside text fields.
 
 ## Storage
+
+tq-app reads a layout from `--layout <file>` or the settings file's
+`layout`, and refuses a file with problems, listing them all. It does not
+edit layouts yet; one made in the web editor can be exported there and
+given to it. Without one, it shows the preset.
 
 The web console keeps the user's layout in `localStorage` under
 `tq.layout.<room>.<preset>`. Without one it makes a preset from the room

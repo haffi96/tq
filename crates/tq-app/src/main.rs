@@ -8,6 +8,9 @@
 //! tq-app --preset operator --room robot-01      # relay on http://127.0.0.1:8080
 //! ```
 //!
+//! It shows a layout of widgets (docs/layout-1.md): `--layout` (or the
+//! settings file's `layout`), else a preset made from the room.
+//!
 //! Started without flags (from Finder, or a desktop launcher) it reads its
 //! settings file ([`config`]); flags override the file.
 
@@ -17,6 +20,7 @@ compile_error!("tq-app decodes with VideoToolbox (macOS) or NVDEC (Linux) and on
 mod config;
 mod decode;
 mod feed;
+mod layout;
 #[cfg(target_os = "linux")]
 mod nvdec;
 mod session;
@@ -28,6 +32,7 @@ mod vt;
 
 use std::path::PathBuf;
 
+use anyhow::Context as _;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use gpui_kit::{
     actions,
@@ -64,6 +69,10 @@ struct Args {
     token: Option<String>,
     #[arg(long, env = "TQ_SHARED_SECRET", hide_env_values = true)]
     secret: Option<String>,
+    /// A layout (docs/layout-1.md) to show instead of the preset made from
+    /// the room.
+    #[arg(long)]
+    layout: Option<PathBuf>,
     /// Also log each video track's numbers every 2 s (headless checks).
     #[arg(long)]
     log_stats: bool,
@@ -118,38 +127,49 @@ fn main() -> anyhow::Result<()> {
         log_stats: args.log_stats,
         build,
     };
+    let layout = match args.layout.or(file.layout) {
+        Some(path) => {
+            let json = std::fs::read_to_string(&path).with_context(|| format!("{}", path.display()))?;
+            let layout =
+                layout::Layout::parse(&json).map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e.join("; ")))?;
+            Some(layout)
+        }
+        None => None,
+    };
     let title = format!("tq · {} · {}", config.room, config.preset);
     let shared = session::start(&rt, config, events_tx);
 
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {
-        gpui_kit::init(cx);
-        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // Matches tq-app.desktop, so the launcher's icon is the window's.
-                app_id: Some("tq-app".into()),
-                #[cfg(target_os = "linux")]
-                icon: window_icon(),
-                ..TitleBar::window_options()
-            },
-            cx,
-            |window, cx| {
-                window.set_window_title(&title);
-                // Follow the system appearance; the title bar toggles it.
-                Theme::sync_system_appearance(Some(window), cx);
-                window
-                    .observe_window_appearance(|window, cx| Theme::sync_system_appearance(Some(window), cx))
-                    .detach();
-                cx.new(|cx| ui::AppView::new(shared, events_rx, updates, window, cx))
-            },
-        )
-        .expect("open window");
-        cx.activate(true);
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::AllAssets)
+        .run(move |cx: &mut App| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+            let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Matches tq-app.desktop, so the launcher's icon is the window's.
+                    app_id: Some("tq-app".into()),
+                    #[cfg(target_os = "linux")]
+                    icon: window_icon(),
+                    ..TitleBar::window_options()
+                },
+                cx,
+                |window, cx| {
+                    window.set_window_title(&title);
+                    // Follow the system appearance; the title bar toggles it.
+                    Theme::sync_system_appearance(Some(window), cx);
+                    window
+                        .observe_window_appearance(|window, cx| Theme::sync_system_appearance(Some(window), cx))
+                        .detach();
+                    cx.new(|cx| ui::AppView::new(shared, events_rx, updates, layout, window, cx))
+                },
+            )
+            .expect("open window");
+            cx.activate(true);
+        });
     drop(rt);
     Ok(())
 }

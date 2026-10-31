@@ -326,6 +326,7 @@ flags. It reads its settings from a file instead; flags still override it:
 | `relay` | QUIC `host:port`. Default: the HTTP host and the relay's QUIC port. |
 | `room`, `preset` | Default `robot-01`, `viewer` (`operator` to drive). `role` is still accepted. |
 | `token` or `secret` | A session token, or the shared secret to sign one. Without either, the app asks a `--dev` relay for a token. |
+| `layout` | A layout file ([layout-1.md](layout-1.md)) to show instead of the preset made from the room. `--layout` overrides it. |
 | `update.repo`, `update.prerelease` | Where updates come from (default `haffi96/tq`), and whether to offer pre-releases. |
 | `update.token` | Optional GitHub token (see [Tokens](#tokens)). |
 
