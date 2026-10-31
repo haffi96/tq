@@ -36,8 +36,12 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 
 ## Current state (handoff)
 
-Updated 2026-10-31. Branch `generalize-core`, open as PR #9 against
-`main`.
+Updated 2026-10-31 (evening). Branch `generalize-core`, open as PR #9
+against `main`, up to date with it. Every CodeRabbit thread is answered
+and resolved, through its review of `0c49a27` (web layouts). CodeRabbit
+then paused automatic reviews on the PR (too many commits), so the tq-app
+commit `f2823f2` and the review fixes `3b02fea` have had no CodeRabbit
+review: comment `@coderabbitai review` (or `resume`) to get one.
 Phase 1 is done; Phase 2's Rust half is done, tq-edge and the "about 10
 lines" SDK goal included. Phase 3: both consoles render layouts
 ([layout-1.md](layout-1.md)); the web console also edits them (see
@@ -104,6 +108,12 @@ for tq-edge's config.
   toggle (acked, device's state read back); a bad layout file refused with
   every problem listed. Moving the video tiles out of a cached view took
   decoded→painted from about 9 ms to about 6 ms.
+- The CodeRabbit fixes (`3b02fea`), live: drive controls disabled until
+  the lock is held, on both consoles; a web widget made to throw shows
+  `draw failed: …` while the rest keep going; the web page starts (STOP
+  included) with `localStorage` throwing; a viewer token with
+  `--perm 'write:*/stop'` gets STOP and its Space stop is acked, a plain
+  viewer gets none.
 
 **Regression check** (needs `../streaming-tools` next to this repo, or
 `STREAMING_TOOLS=…`): run `dev/run-local.sh` (or
@@ -120,7 +130,12 @@ Then open `http://localhost:8080/?room=robot-01&preset=operator` and run
 stop the robot under all circumstances. Both consoles' STOP (button and
 Space) send on every robot's `stop` channel, resend every 50 ms until
 acked (2 s, then the log says no answer), and let go of their own drive
-lock. Space is taken before any focused control can act on it. The robot
+locks (tq-app: every lock it holds). Space is taken before any focused
+control can act on it. STOP is not a widget: it is in each console's
+header, outside any layout. It is offered to the operator preset and to
+any session allowed to write a room's `stop` channel, and once offered it
+stays. A drive widget sends only while its lock is held, and losing the
+lock turns streaming off. The robot
 latches: it rejects drive commands until its drive lock is claimed again
 at least 500 ms later (Claim while holding re-claims); a robot reconnect
 does not re-arm it (claims are numbered). Release lets go without
@@ -138,17 +153,23 @@ console key handling.
 - Web: Space is STOP even in the editor's text fields (paste text with
   spaces). Gamepad drive is in but untested with a real pad (the user
   will test it). No `map` widget yet. Layouts live in `localStorage`
-  only.
+  only. A widget that throws stays marked failed until it is remade
+  (edited, or the layout changes).
 - A killed relay does not close connections, so clients notice only at
   the QUIC idle timeout.
-- tq-app at narrow widths: the status bar text overlaps and lock badges
-  overflow. Its "Held by" badge shows a bare session id.
+- tq-app's "Held by" badges show a bare session id.
 - Relay replay of `.events` on subscribe is by design; both consoles now
   log those lines at the time they happened.
-- Testing tip: on this machine the T3 Code app probes every new local
+- Testing tips: on this machine the T3 Code app probes every new local
   listening port with an HTTP `GET /`. Raw TCP test servers must tolerate
   stray connections. Drive tq-app's GUI with osascript System Events
-  keystrokes (CGEvent key events do not reach it; CGEvent clicks do).
+  keystrokes (CGEvent key events do not reach it; CGEvent clicks do: a
+  ten-line Swift program posting `leftMouseDown`/`Up` works; screen
+  points are screenshot pixels / 2). The web console runs in headless
+  Chrome through `playwright-core` with the installed Google Chrome
+  (WebTransport and HEVC work); keep that script outside the repo.
+  `tq-relay --secret … token --preset viewer --perm 'write:*/stop'` mints
+  tokens with extra permissions.
 
 **Next:** the editor in tq-app (and a narrow-width mode), layouts per
 room on the relay so both consoles share them, a `map` widget. The TS client
