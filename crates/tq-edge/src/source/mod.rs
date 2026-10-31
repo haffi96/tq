@@ -75,9 +75,10 @@ pub fn spawn(track: &TrackConfig, p: Arc<Publication>, stats: Arc<Stats>) -> any
     let id = track.id.clone();
     match track.kind {
         TrackKind::Video => {
+            let SourceConfig::Tcp { addr, .. } = &track.source;
             let opts = tcp_video::Options::from_config(&track.source)?;
-            let out = p.video(&id).expect("advertised from this config");
-            tokio::spawn(tcp_video::run(id, opts, out, p, stats));
+            let out = p.video_with(&id, opts.video).expect("advertised from this config");
+            tokio::spawn(tcp_video::run(addr.clone(), out, stats));
         }
         TrackKind::Data => {
             let SourceConfig::Tcp { addr, .. } = &track.source;

@@ -36,9 +36,10 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 
 ## Current state (handoff)
 
-Updated 2026-10-31. Branch `generalize-core`, open as a PR against
-`main`. Phase 1 is done; Phase 2's Rust half is done, tq-edge included
-(see below). Start with [protocol-3.md](protocol-3.md) for the wire
+Updated 2026-10-31. Branch `generalize-core`, open as PR #9 against
+`main`.
+Phase 1 is done; Phase 2's Rust half is done, tq-edge and the "about 10
+lines" SDK goal included (see below). Start with [protocol-3.md](protocol-3.md) for the wire
 format, `crates/tq/src/lib.rs` for the SDK, `crates/tq-relay/src/tests.rs`
 for worked examples of every feature, and [install.md](install.md#the-config)
 for tq-edge's config.
@@ -47,17 +48,20 @@ for tq-edge's config.
 - `crates/tq`: the SDK. `Session` (one connection), `Client` (reconnects,
   resubscribes, republishes), `Session::hold` (claim + heartbeat a lock),
   `Frame::hops()` / `capture_local_us()` (timestamps on the local clock),
-  `tq::discover` (relay info, dev tokens, `Options::discover`).
+  `tq::discover` (relay info, dev tokens, `Options::discover`). The short
+  path: `Publication::builder`, `Publication::video` (a `VideoWriter`),
+  `Token::publisher`, `Client::discover`; `examples/camera.rs` uses them.
 - `crates/tq-teleop`: drive channel behind a dead-man lock, the remote
   stop (latching), `.status` / `.events`.
 - `crates/tq-edge`: the device agent (was tq-publisher). Config-driven:
-  tracks fed by sources (`src/source/`, `tcp` today), channels feeding
-  sinks (`src/sink.rs`: `log`, `tcp`), optional teleop with its own sink.
+  tracks fed by sources (`src/source/`, `tcp` today, video through the
+  SDK's `VideoWriter`), channels feeding sinks (`src/sink.rs`: `log`,
+  `tcp`), optional teleop with its own sink.
 - Consoles: `web/` and `crates/tq-app` (GPUI), both on protocol 3.0.
 
 **Verified (all on the current branch head):**
 - `cargo test` and `cargo clippy --all-targets`: clean, including the
-  relay's end-to-end tests (13), tq-edge's config tests and the SDK's.
+  relay's end-to-end tests (14), tq-edge's config tests and the SDK's.
 - `cargo build -p tq-app && cargo clippy -p tq-app --all-targets`: clean.
   tq-app is not a default member, so plain `cargo build` skips it.
 - `cd web && bun run typecheck && bun run build`: passes.
@@ -67,7 +71,9 @@ for tq-edge's config.
   restart under tq-edge and tq-app (both reconnect, video resumes, the
   lock comes back free); tq-edge's full example with a stand-in device
   program (data source, channel sink, teleop sink, refusals while the
-  program is gone).
+  program is gone); `examples/camera.rs` fed by ffmpeg alongside tq-edge
+  (about 30 fps, its channel message acked) with the regression check
+  still passing.
 
 **Regression check** (needs `../streaming-tools` next to this repo, or
 `STREAMING_TOOLS=…`): run `dev/run-local.sh` (or
@@ -107,10 +113,9 @@ console key handling.
   stray connections. Drive tq-app's GUI with osascript System Events
   keystrokes (CGEvent key events do not reach it; CGEvent clicks do).
 
-**Next:** Phase 2's "publish a camera and a channel in about 10 lines of
-Rust" (an SDK convenience layer, probably a tq-edge library half). The TS
-client package, golden test vectors and a pyo3 example are lower
-priority. Then Phase 3 (widgets, layout spec, web first).
+**Next:** Phase 3 (widgets, layout spec, web first). The TS client
+package, golden test vectors and a pyo3 example are lower priority and
+can come whenever.
 
 ## Phases
 
@@ -173,8 +178,18 @@ Done (the crate was pulled into Phase 1 so each client was ported once):
   stand-in program, including refusing while it is gone) and the plain
   example with both consoles.
 
+- Publishing a camera and a channel is about 10 lines of Rust
+  (`crates/tq/examples/camera.rs`, H.264/H.265 on stdin):
+  `Publication::builder(name).video(id).channel(id).build()`,
+  `Token::publisher(secret, name)` (publish tokens are never minted over
+  HTTP), `Client::discover(url, room, token)`, and `Publication::video`,
+  a `VideoWriter` that takes an encoder's byte stream (`write`) or whole
+  access units (`write_frame`, out at once; `write_frame_at` with the
+  camera's capture time, which sets `CAPTURE_FROM_SEI` like an SEI time
+  does). tq-edge's TCP video source runs on it. Test:
+  `video_writer_publishes_an_encoder_stream`.
+
 Still to do:
-- Goal: publishing a camera and a channel is about 10 lines of Rust.
 - TS client package taken out of `web/src/worker.ts` and `protocol.ts`.
 - Golden test vectors (encoded bytes and decoded values) in the repo, checked
   by Rust and TS alike, so the two codecs cannot drift apart.

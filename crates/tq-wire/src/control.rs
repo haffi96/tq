@@ -64,6 +64,17 @@ fn json() -> String {
     "json".into()
 }
 
+impl DataInfo {
+    pub fn json(delivery: Delivery) -> Self {
+        Self {
+            encoding: json(),
+            delivery,
+            rate_hz: None,
+            window_ms: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackInfo {
     pub id: String,
@@ -144,6 +155,19 @@ pub struct ChannelInfo {
     pub schema: Option<serde_json::Value>,
 }
 
+impl ChannelInfo {
+    /// A JSON channel with no lock.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: String::new(),
+            lock: None,
+            encoding: json(),
+            schema: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockInfo {
     pub id: String,
@@ -152,6 +176,17 @@ pub struct LockInfo {
     /// Enforced by the owner; informational for everyone else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<Watchdog>,
+}
+
+impl LockInfo {
+    /// A lock with no watchdog.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: String::new(),
+            watchdog: None,
+        }
+    }
 }
 
 /// A broadcast as its owner describes it. Indices on the wire are positions

@@ -18,7 +18,7 @@ use std::{
 use tokio::sync::{broadcast, broadcast::error::RecvError, mpsc, watch};
 use tq_wire::{Control, Path, RoomEvent, RoomState, Subscription};
 
-use crate::{Frame, Incompatible, Options, PublishOptions, Publication, Reply, Session};
+use crate::{Frame, Incompatible, Options, PublishOptions, Publication, Reply, Session, Token};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
@@ -127,6 +127,18 @@ impl Client {
             shared,
             run: Arc::new(run),
         }
+    }
+
+    /// A client for the relay whose web address is `http`
+    /// (`http://localhost:8080`): its QUIC endpoint, trust and token found
+    /// again on every attempt (see [`Options::discover`]).
+    pub fn discover(http: &str, room: &str, token: Token) -> anyhow::Result<Self> {
+        let http: url::Url = http.parse()?;
+        let room = room.to_string();
+        Ok(Self::new(move || {
+            let (http, room, token) = (http.clone(), room.clone(), token.clone());
+            async move { Options::discover(&http, None, &room, &token, tq_wire::build_info!("tq")).await }
+        }))
     }
 
     pub fn conn(&self) -> watch::Receiver<Conn> {

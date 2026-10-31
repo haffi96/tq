@@ -19,40 +19,39 @@
 //! the program reconnects.
 //!
 //! ```no_run
-//! # async fn demo(opts: tq::Options) -> anyhow::Result<()> {
-//! use tq::wire::{Advertisement, DataInfo, Delivery, TrackInfo};
-//!
-//! let (rover, mut inbox) = tq::Publication::new(Advertisement {
-//!     broadcast: "rover-7".into(),
-//!     tracks: vec![TrackInfo::data("pose", DataInfo {
-//!         encoding: "json".into(),
-//!         delivery: Delivery::Latest,
-//!         rate_hz: Some(50.0),
-//!         window_ms: None,
-//!     })],
-//!     ..Default::default()
-//! })?;
-//! let session = tq::Session::connect(opts).await?;
-//! session.publish(&rover).await?;
-//! rover.data("pose").unwrap().send_json(&serde_json::json!({ "x": 1.0 }));
+//! # async fn demo(encoder: impl Iterator<Item = Vec<u8>> + Send + 'static) -> anyhow::Result<()> {
+//! let (rover, mut inbox) = tq::Publication::builder("rover-7").video("front").channel("lights").build()?;
+//! let token = tq::Token::publisher("shared-secret", "rover-7");
+//! let client = tq::Client::discover("http://localhost:8080", "robot-01", token)?;
+//! client.publish(&rover, Default::default());
+//! let mut front = rover.video("front").unwrap();
+//! std::thread::spawn(move || encoder.for_each(|au| drop(front.write_frame(&au))));
 //! while let Some(msg) = inbox.recv().await {
 //!     msg.accept();
 //! }
 //! # Ok(()) }
 //! ```
+//!
+//! `examples/camera.rs` runs this against a dev relay. Data tracks are
+//! written the same way ([`Publication::data`]); [`Publication::builder`]
+//! takes any track, channel or lock, and [`Session`] gives full control of
+//! one connection.
 
 mod client;
 pub mod discover;
 mod publication;
 mod session;
+mod video;
 mod watchdog;
 
 pub use client::{Client, Conn, Reader};
 pub use discover::{Incompatible, Token};
-pub use publication::{DataWriter, Holder, Inbox, Message, PublishOptions, Publication};
+pub use publication::{Builder, DataWriter, Holder, Inbox, Message, PublishOptions, Publication};
 pub use session::{Channel, Clocks, Frame, Hold, Hops, Options, Refused, Reply, Session, TrackReader};
+pub use video::{VideoOptions, VideoWriter};
 pub use watchdog::WatchdogStatus;
 
+pub use tq_media as media;
 pub use tq_transport as transport;
 pub use tq_transport::quic::{QuicOptions, ServerTrust};
 pub use tq_wire as wire;

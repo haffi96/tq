@@ -16,11 +16,14 @@ use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, watch};
 use tq_transport::{dgtrack::DatagramTrack, track::Track, wt};
 use tq_wire::{
-    now_us, AckStatus, Advertisement, Datagram, Delivery, Event, FrameHeader, MediaFrame, Path, TrackKind,
-    ECHO_TRIPPED, FLAG_KEY,
+    now_us, AckStatus, Advertisement, ChannelInfo, DataInfo, Datagram, Delivery, Event, FrameHeader, LockInfo,
+    MediaFrame, Path, TrackInfo, TrackKind, VideoInfo, ECHO_TRIPPED, FLAG_KEY,
 };
 
-use crate::watchdog::{self, Edge, WatchdogStatus};
+use crate::{
+    video::{VideoOptions, VideoWriter},
+    watchdog::{self, Edge, WatchdogStatus},
+};
 
 /// Messages queued for the app before new ones are refused.
 const INBOX: usize = 256;
@@ -97,7 +100,78 @@ pub struct Publication {
     link: Mutex<Option<Link>>,
 }
 
+/// A broadcast described piece by piece, for [`Publication::builder`].
+pub struct Builder {
+    ad: Advertisement,
+}
+
+impl Builder {
+    /// A video track (codec detected from its stream).
+    pub fn video(self, id: &str) -> Self {
+        self.track(TrackInfo::video(
+            id,
+            VideoInfo {
+                codec: "auto".into(),
+                width: 0,
+                height: 0,
+                fps: 0,
+            },
+        ))
+    }
+
+    /// A JSON data track.
+    pub fn data(self, id: &str, delivery: Delivery) -> Self {
+        self.track(TrackInfo::data(id, DataInfo::json(delivery)))
+    }
+
+    pub fn track(mut self, t: TrackInfo) -> Self {
+        self.ad.tracks.push(t);
+        self
+    }
+
+    /// A JSON channel anyone allowed to write may send on.
+    pub fn channel(self, id: &str) -> Self {
+        self.channel_info(ChannelInfo::new(id))
+    }
+
+    pub fn channel_info(mut self, c: ChannelInfo) -> Self {
+        self.ad.channels.push(c);
+        self
+    }
+
+    pub fn lock(mut self, l: LockInfo) -> Self {
+        self.ad.locks.push(l);
+        self
+    }
+
+    /// Anything else: `.edit(|ad| tq_teleop::advertise(ad, &cfg))`.
+    pub fn edit(mut self, f: impl FnOnce(&mut Advertisement)) -> Self {
+        f(&mut self.ad);
+        self
+    }
+
+    pub fn advertisement(self) -> Advertisement {
+        self.ad
+    }
+
+    /// The publication, and the inbox its channel messages arrive in.
+    pub fn build(self) -> anyhow::Result<(Arc<Publication>, Inbox)> {
+        Publication::new(self.ad)
+    }
+}
+
 impl Publication {
+    /// Describes broadcast `name` piece by piece:
+    /// `Publication::builder("rover-7").video("front").channel("lights").build()?`.
+    pub fn builder(name: &str) -> Builder {
+        Builder {
+            ad: Advertisement {
+                broadcast: name.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
     /// A publication of `ad`, and the inbox its channel messages arrive in.
     pub fn new(ad: Advertisement) -> anyhow::Result<(Arc<Self>, Inbox)> {
         ad.validate().map_err(anyhow::Error::msg)?;
@@ -155,9 +229,19 @@ impl Publication {
         &self.ad
     }
 
-    /// The group cache of a video track: push the source's frames here.
-    /// Frames need their group and index; the session stamps the rest.
-    pub fn video(&self, id: &str) -> Option<Arc<Track>> {
+    /// A writer for a video track: encoder output in, frames out.
+    pub fn video(self: &Arc<Self>, id: &str) -> Option<VideoWriter> {
+        self.video_with(id, VideoOptions::default())
+    }
+
+    pub fn video_with(self: &Arc<Self>, id: &str, opts: VideoOptions) -> Option<VideoWriter> {
+        let track = self.video_track(id)?;
+        Some(VideoWriter::new(self.clone(), id, track, opts))
+    }
+
+    /// The group cache of a video track, for frames made elsewhere. Frames
+    /// need their group and index; the session stamps the rest.
+    pub fn video_track(&self, id: &str) -> Option<Arc<Track>> {
         let (i, t) = self.ad.track(id)?;
         match (&self.tracks[i as usize], t.kind) {
             (LocalTrack::Groups(g), TrackKind::Video) => Some(g.clone()),

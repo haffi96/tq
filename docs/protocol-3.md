@@ -200,7 +200,8 @@ frame        := len:u32 index:u32 flags:u8 capture_us:u64 publisher_us:u64
 ```
 
 2.0's format with `camera:u16` replaced by `broadcast:u16 track:u16` and the
-version bumped to 2. Flags: bit 0 `KEY`, bit 1 `CAPTURE_FROM_SEI`. A frame
+version bumped to 2. Flags: bit 0 `KEY`, bit 1 `CAPTURE_FROM_SEI` (a real
+capture time: the encoder's SEI, or one the owner's source gave). A frame
 holds at most 16 MiB. Group numbers increase per track; each node renumbers
 them, so they only mean something on one hop.
 
@@ -434,7 +435,7 @@ Every frame carries the times it reached each stage:
 
 | Stage | Clock | Set by |
 | --- | --- | --- |
-| `capture_us` | encoder (SEI) or owner | the encoder's LKTS SEI if present (`CAPTURE_FROM_SEI`), else the owner on receipt |
+| `capture_us` | encoder (SEI) or owner | the encoder's LKTS SEI or the source's own capture time (`CAPTURE_FROM_SEI`), else the owner on receipt |
 | `publisher_us` | owner | the owner once the access unit or message is complete |
 | `relay_us` | relay | the relay on receipt |
 | receive, decode, present | subscriber | the subscribing app, locally |

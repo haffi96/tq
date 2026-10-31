@@ -127,15 +127,7 @@ impl Harness {
 }
 
 fn data(id: &str, delivery: Delivery) -> TrackInfo {
-    TrackInfo::data(
-        id,
-        DataInfo {
-            encoding: "json".into(),
-            delivery,
-            rate_hz: None,
-            window_ms: None,
-        },
-    )
+    TrackInfo::data(id, DataInfo::json(delivery))
 }
 
 fn video(id: &str) -> TrackInfo {
@@ -282,7 +274,7 @@ async fn publish_and_subscribe() {
     // on a realtime uplink, so each is sent after the previous arrived.
     let mut cam = viewer.subscribe(path("rover/cam")).await.unwrap();
     demand.wait_for(|d| d.get("cam") == Some(&1)).await.unwrap();
-    let t = p.video("cam").unwrap();
+    let t = p.video_track("cam").unwrap();
     let push = |group, index| {
         t.push(MediaFrame {
             broadcast: 0,
@@ -329,6 +321,73 @@ async fn publish_and_subscribe() {
     })
     .await;
     assert!(viewer.owner_offset("rover").is_some());
+}
+
+#[tokio::test]
+async fn video_writer_publishes_an_encoder_stream() {
+    const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+    const PPS: &[u8] = &[0x68, 0xce];
+    const IDR: &[u8] = &[0x65, 0x88];
+    const P: &[u8] = &[0x41, 0x9a];
+    fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+        nals.iter().flat_map(|n| [&[0, 0, 0, 1], *n].concat()).collect()
+    }
+
+    let h = Harness::start().await;
+    let viewer = h.session("viewer", Perms::viewer()).await;
+    let mut events = viewer.events();
+    let robot = h.session("robot", Perms::robot("rover")).await;
+    let (p, _inbox) = Publication::builder("rover")
+        .video("cam")
+        .channel("lights")
+        .build()
+        .unwrap();
+    robot.publish(&p).await.unwrap();
+    until(&viewer, |r| r.broadcast("rover").is_some()).await;
+    let mut cam = viewer.subscribe(path("rover/cam")).await.unwrap();
+    p.demand().wait_for(|d| d.get("cam") == Some(&1)).await.unwrap();
+    let mut w = p.video("cam").unwrap();
+
+    // A byte stream in small chunks. The P frame before the first keyframe
+    // is dropped. Without AUDs a frame ends when the next one's first NAL
+    // is complete, so the last two P frames wait.
+    for chunk in annexb(&[P, SPS, PPS, IDR, P, P]).chunks(3) {
+        w.write(chunk).unwrap();
+    }
+    expect(&mut events, |e| matches!(e, Event::TrackOnline { track } if track.name == "cam").then_some(())).await;
+    let key = frame(&mut cam).await;
+    assert!(key.is_key() && key.header.index == 0);
+    assert_eq!(&*key.codec, "avc1.42c01f");
+    assert_eq!(&key.payload[..], &annexb(&[SPS, PPS, IDR])[..]);
+    // A whole access unit goes out at once, and ends the ones before it.
+    w.write_frame(&annexb(&[P])).unwrap();
+    for index in [1, 2, 3] {
+        let f = frame(&mut cam).await;
+        assert_eq!((f.group, f.header.index, f.is_key()), (key.group, index, false));
+        assert_eq!(&f.payload[..], &annexb(&[P])[..]);
+    }
+    assert_eq!((w.frames(), w.codec_string()), (4, Some("avc1.42c01f")));
+
+    // The source stops: offline with its reason, then a new group at the
+    // next keyframe, parameter sets put back in front of it.
+    w.reset("encoder stopped");
+    let reason = expect(&mut events, |e| match e {
+        Event::TrackOffline { track, reason } if track.name == "cam" => Some(reason.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(reason, "encoder stopped");
+    w.write_frame(&annexb(&[P])).unwrap();
+    w.write_frame_at(&annexb(&[SPS, PPS, IDR]), 42).unwrap();
+    let f = frame(&mut cam).await;
+    assert!(f.is_key() && f.group > key.group);
+    assert_eq!(f.header.capture_us, 42);
+    assert_ne!(f.header.flags & tq_wire::FLAG_CAPTURE_FROM_SEI, 0);
+    // A new group supersedes the last at once, so one at a time.
+    w.write_frame(&annexb(&[IDR])).unwrap();
+    let f2 = frame(&mut cam).await;
+    assert_eq!(f2.group, f.group + 1);
+    assert_eq!(&f2.payload[..], &annexb(&[SPS, PPS, IDR])[..]);
 }
 
 #[tokio::test]

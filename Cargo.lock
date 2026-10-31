@@ -7133,9 +7133,11 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "tq-media",
  "tq-transport",
  "tq-wire",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -7180,7 +7182,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tq",
- "tq-media",
  "tq-teleop",
  "tq-transport",
  "tq-wire",

@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+tq-media = { workspace = true }
 tq-wire = { workspace = true }
 tq-transport = { workspace = true }
 anyhow = { workspace = true }
@@ -16,3 +17,6 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

@@ -9,7 +9,6 @@ build = "../../build/version.rs"
 
 [dependencies]
 tq = { workspace = true }
-tq-media = { workspace = true }
 tq-teleop = { workspace = true }
 tq-transport = { workspace = true }
 tq-wire = { workspace = true }

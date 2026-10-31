@@ -32,7 +32,8 @@ pub const FRAME_HEADER_LEN: usize = 4 + 1 + 8 + 8 + 8 + 4;
 pub const MAX_FRAME_LEN: usize = 16 << 20;
 
 pub const FLAG_KEY: u8 = 1 << 0;
-/// `capture_us` came from the encoder's SEI rather than the publisher clock.
+/// `capture_us` is when the camera captured the frame (from the encoder's
+/// SEI, or a time the owner's source gave), not when the owner got it.
 pub const FLAG_CAPTURE_FROM_SEI: u8 = 1 << 1;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

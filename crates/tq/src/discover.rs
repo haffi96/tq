@@ -63,6 +63,18 @@ pub enum Token {
 }
 
 impl Token {
+    /// Signed here with the relay's shared secret, allowed to publish
+    /// broadcast `name` (the robot preset). The relay never mints these
+    /// over HTTP.
+    pub fn publisher(secret: impl Into<String>, name: &str) -> Self {
+        Token::Signed {
+            secret: secret.into(),
+            sub: name.to_string(),
+            perms: Perms::robot(name),
+            ttl: Duration::from_secs(24 * 3600),
+        }
+    }
+
     async fn get(&self, http: &url::Url, room: &str) -> anyhow::Result<String> {
         Ok(match self {
             Token::Given(t) => t.clone(),
