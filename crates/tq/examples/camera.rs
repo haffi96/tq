@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
         while let Ok(n @ 1..) = std::io::stdin().read(&mut buf) {
             let _ = front.write(&buf[..n]);
         }
+        front.flush();
         front.reset("stdin closed");
     });
 

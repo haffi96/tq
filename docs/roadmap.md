@@ -61,7 +61,7 @@ for tq-edge's config.
 
 **Verified (all on the current branch head):**
 - `cargo test` and `cargo clippy --all-targets`: clean, including the
-  relay's end-to-end tests (14), tq-edge's config tests and the SDK's.
+  relay's end-to-end tests (16), tq-edge's config tests and the SDK's.
 - `cargo build -p tq-app && cargo clippy -p tq-app --all-targets`: clean.
   tq-app is not a default member, so plain `cargo build` skips it.
 - `cd web && bun run typecheck && bun run build`: passes.

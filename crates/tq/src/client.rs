@@ -185,7 +185,8 @@ impl Client {
 
     /// Subscribes to a track on every session from now on. Group numbers
     /// keep increasing across sessions, so a reconnect looks like a new
-    /// group (a new GOP, for video) to the reader.
+    /// group (a new GOP, for video) to the reader. One reader per track: a
+    /// new one replaces the last, whose frames end.
     pub fn subscribe(&self, sub: impl Into<Subscription>) -> Reader {
         let sub = sub.into();
         let path = sub.track.clone();
@@ -346,7 +347,13 @@ async fn resubscribe(mut conn: watch::Receiver<Conn>, sub: Subscription, tx: mps
                         f = reader.recv() => f,
                         _ = tx.closed() => return,
                     };
-                    let Some(mut f) = f else { break };
+                    let Some(mut f) = f else {
+                        if session.is_closed() {
+                            break;
+                        }
+                        // Replaced by a newer reader of the track: this one ends.
+                        return;
+                    };
                     // Datagram tracks have no groups.
                     if f.group != 0 {
                         f.group += base;
@@ -381,7 +388,8 @@ impl Reader {
         &self.path
     }
 
-    /// The next frame; `None` only once the client is gone.
+    /// The next frame; `None` once the client is gone or a newer reader
+    /// of the track replaced this one.
     pub async fn recv(&mut self) -> Option<Frame> {
         self.rx.recv().await
     }

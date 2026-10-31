@@ -353,8 +353,10 @@ impl Session {
             };
             tasks.abort_all();
             supervisor.wt.close(tq_wire::code::SHUTDOWN, b"bye");
-            supervisor.subs.lock().unwrap().clear();
+            // Closed first: a reader whose frames end can tell an ended
+            // session from being replaced.
             supervisor.close(reason);
+            supervisor.subs.lock().unwrap().clear();
         });
         Ok(Self { inner })
     }

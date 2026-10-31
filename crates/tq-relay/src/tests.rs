@@ -388,6 +388,44 @@ async fn video_writer_publishes_an_encoder_stream() {
     let f2 = frame(&mut cam).await;
     assert_eq!(f2.group, f.group + 1);
     assert_eq!(&f2.payload[..], &annexb(&[SPS, PPS, IDR])[..]);
+
+    // A stream that ends: flush sends the frame nothing came after.
+    w.write(&annexb(&[P])).unwrap();
+    w.flush();
+    let f3 = frame(&mut cam).await;
+    assert_eq!((f3.group, f3.header.index), (f2.group, 1));
+}
+
+#[tokio::test]
+async fn a_newer_client_reader_replaces_the_older_for_good() {
+    let h = Harness::start().await;
+    let robot = h.session("robot", Perms::robot("rover")).await;
+    let (p, _inbox) = Publication::new(rover(vec![data("log", Delivery::Stream)])).unwrap();
+    robot.publish(&p).await.unwrap();
+    p.set_online("log", true, "");
+    let opts = h.options("viewer", Perms::viewer());
+    let viewer = tq::Client::new(move || {
+        let opts = opts.clone();
+        async move { Ok(opts) }
+    });
+    let mut first = viewer.subscribe(path("rover/log"));
+    let mut demand = p.demand();
+    demand.wait_for(|d| d.get("log") == Some(&1)).await.unwrap();
+    let mut second = viewer.subscribe(path("rover/log"));
+    // The older one ends, and does not take the track back.
+    assert!(tokio::time::timeout(WAIT, first.recv()).await.unwrap().is_none());
+    let w = p.data("log").unwrap();
+    for i in 0..10 {
+        w.send_json(&i);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut got = Vec::new();
+    while got.last() != Some(&9) {
+        let f = tokio::time::timeout(WAIT, second.recv()).await.unwrap().unwrap();
+        got.push(f.json::<i32>().unwrap());
+    }
+    // Every message after the second reader took over, in order.
+    assert_eq!(got, (0..10).collect::<Vec<_>>());
 }
 
 #[tokio::test]

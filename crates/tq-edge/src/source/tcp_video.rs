@@ -60,6 +60,8 @@ pub async fn run(addr: String, mut out: VideoWriter, stats: Arc<Stats>) {
                 tracing::info!(track = %out.id(), source = %addr, "source connected");
                 let reason = match read_stream(&mut out, stream, &stats).await {
                     Ok(()) => {
+                        // Its last frame has nothing after it to end it.
+                        out.flush();
                         tracing::warn!(track = %out.id(), "source closed");
                         "source closed".to_string()
                     }

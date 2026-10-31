@@ -118,6 +118,17 @@ impl VideoWriter {
         Ok(())
     }
 
+    /// Sends what [`VideoWriter::write`] still holds: the last frame of a
+    /// stream that has ended, which nothing after it will complete.
+    pub fn flush(&mut self) {
+        self.nals.clear();
+        if let Err(e) = self.framer.flush(&mut self.nals) {
+            self.reset(&e.to_string());
+            return;
+        }
+        self.assemble(true, None);
+    }
+
     /// The source stopped: the track goes offline (subscribers hear why)
     /// and starts again at the next keyframe written.
     pub fn reset(&mut self, reason: &str) {
