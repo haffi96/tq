@@ -742,6 +742,19 @@ async fn estop_latches_until_the_drive_lock_is_claimed_again() {
     let (status, detail) = ack_of(&mut replies, &drive_path, seq).await;
     assert_eq!(status, AckStatus::Rejected);
     assert!(detail.contains("e-stopped"), "{detail}");
+    // The holder's heartbeat echoes say so too.
+    let mut wd = p.watchdog("drive").unwrap();
+    assert!(wd.borrow_and_update().tripped);
+    let tripped = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Reply::Echo { tripped, .. } = replies.recv().await.unwrap() {
+                return tripped;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(tripped);
 
     // A claim right after the e-stop may have raced it: still stopped.
     held.release().await.unwrap();

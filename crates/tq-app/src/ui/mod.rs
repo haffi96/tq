@@ -115,6 +115,27 @@ impl AppView {
         view
     }
 
+    /// Space is E-STOP, before anything else sees it: a focused button or
+    /// switch would otherwise take it as a click too (a focused Claim
+    /// would re-claim, a focused Stream switch would stream again).
+    fn on_capture_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if e.keystroke.key != "space" || !self.model.read(cx).operator() {
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+        if !e.is_held {
+            self.model.update(cx, |m, cx| m.estop(cx));
+        }
+    }
+
+    fn on_capture_key_up(&mut self, e: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if e.keystroke.key == "space" && self.model.read(cx).operator() {
+            window.prevent_default();
+            cx.stop_propagation();
+        }
+    }
+
     fn on_key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if !self.model.read(cx).operator() || e.keystroke.modifiers.platform || e.keystroke.modifiers.control {
             return;
@@ -124,11 +145,6 @@ impl AppView {
             "a" => "a",
             "s" => "s",
             "d" => "d",
-            "space" => {
-                self.model.update(cx, |m, cx| m.estop(cx));
-                cx.stop_propagation();
-                return;
-            }
             _ => return,
         };
         self.model.update(cx, |m, cx| {
@@ -162,6 +178,8 @@ impl Render for AppView {
         v_flex()
             .id("root")
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(Self::on_capture_key_down))
+            .capture_key_up(cx.listener(Self::on_capture_key_up))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .size_full()

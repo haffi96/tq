@@ -90,6 +90,11 @@ impl State {
         self.trip(if sid.is_some() { "new holder" } else { "no holder" })
     }
 
+    /// The owner's app trips it (an e-stop, say).
+    pub fn trip_by_app(&mut self, reason: &str) -> Option<Edge> {
+        self.trip(reason)
+    }
+
     pub fn connection_lost(&mut self) -> Option<Edge> {
         self.holder = None;
         self.trip("relay connection lost")

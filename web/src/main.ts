@@ -443,12 +443,30 @@ function setupOperator() {
       keys.add(k);
       e.preventDefault();
     }
-    if (k === ' ') {
-      estop();
-      e.preventDefault();
-    }
   });
   window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
+  // Space is E-STOP, before anything else sees it (capture phase): a
+  // focused button or checkbox would otherwise take it as a click too (a
+  // focused Claim would re-claim, the stream box would stream again).
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.key !== ' ') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) estop();
+    },
+    true,
+  );
+  window.addEventListener(
+    'keyup',
+    (e) => {
+      if (e.key !== ' ') return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true,
+  );
   window.addEventListener('blur', () => keys.clear());
 }
 

@@ -347,6 +347,16 @@ impl Publication {
         }
     }
 
+    /// Trips a lock's watchdog from the app (an e-stop, say). It clears
+    /// like any trip: on the holder's next accepted message.
+    pub fn trip(&self, lock: &str, reason: &str) {
+        if let Some((state, tx)) = self.watchdogs.get(lock) {
+            let mut s = state.lock().unwrap();
+            let edge = s.trip_by_app(reason);
+            self.publish_edge(lock, edge, &s.status, tx);
+        }
+    }
+
     pub(crate) fn set_demand(&self, track: &str, subscribers: u32) {
         self.demand.send_modify(|d| {
             d.insert(track.to_string(), subscribers);

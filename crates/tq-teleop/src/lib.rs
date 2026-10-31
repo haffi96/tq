@@ -220,6 +220,7 @@ impl Teleop {
                 let reason = format!("e-stop from session {}", msg.from_sid);
                 // Stop first; everything else is bookkeeping.
                 self.sink.safe_stop(&reason);
+                let reason_for_watchdog = reason.clone();
                 // Consoles repeat an e-stop until it is acked: a repeat
                 // within REARM_AFTER is the same press.
                 let repeat = {
@@ -229,6 +230,8 @@ impl Teleop {
                     repeat
                 };
                 msg.accept();
+                // Holders see it in their heartbeat echoes too.
+                self.p.trip(DRIVE, &reason_for_watchdog);
                 if !repeat {
                     self.estops.fetch_add(1, Relaxed);
                     if let Some(events) = self.p.data(".events") {
