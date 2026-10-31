@@ -656,6 +656,124 @@ async fn discover_over_http() {
         .is_err());
 }
 
+/// Records what reaches the robot's motion interface.
+#[derive(Default)]
+struct Motion(Mutex<Vec<String>>);
+
+impl tq_teleop::Sink for Motion {
+    fn apply(&self, cmd: &tq_teleop::Command) -> Result<(), String> {
+        self.0.lock().unwrap().push(cmd.command.clone());
+        Ok(())
+    }
+
+    fn safe_stop(&self, reason: &str) {
+        self.0.lock().unwrap().push(format!("stop: {reason}"));
+    }
+}
+
+/// The ack for one message on `channel`.
+async fn ack_of(rx: &mut broadcast::Receiver<Reply>, channel: &Path, seq: u32) -> (AckStatus, String) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if let Reply::Ack {
+                channel: c,
+                seq: s,
+                status,
+                detail,
+                ..
+            } = rx.recv().await.unwrap()
+            {
+                if c == *channel && s == seq {
+                    return (status, detail);
+                }
+            }
+        }
+    })
+    .await
+    .expect("no ack")
+}
+
+#[tokio::test]
+async fn estop_latches_until_the_drive_lock_is_claimed_again() {
+    let h = Harness::start().await;
+    let robot = h.session("robot", Perms::robot("rover")).await;
+    let mut ad = rover(vec![]);
+    (ad.channels, ad.locks) = (vec![], vec![]);
+    tq_teleop::advertise(&mut ad, &tq_teleop::Config::default());
+    let (p, mut inbox) = Publication::new(ad).unwrap();
+    let motion = Arc::new(Motion::default());
+    let teleop = tq_teleop::Teleop::new(&p, motion.clone()).unwrap();
+    tokio::spawn(async move {
+        while let Some(m) = inbox.recv().await {
+            teleop.handle(m);
+        }
+    });
+    robot.publish(&p).await.unwrap();
+    let driver = h.session("driver", Perms::operator()).await;
+    let other = h.session("other", Perms::operator()).await;
+    for s in [&driver, &other] {
+        until(s, |r| r.broadcast("rover").is_some()).await;
+    }
+    let (drive_path, estop_path) = (path("rover/drive"), path("rover/estop"));
+    let mut replies = driver.replies();
+    let drive = driver.channel(drive_path.clone());
+    let cmd = serde_json::json!({ "command": "drive", "args": { "throttle": 0.5 } });
+    let hold = |s: &Session| {
+        let s = s.clone();
+        async move {
+            s.hold(path("rover/drive"), false, Duration::from_millis(50))
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+
+    let held = hold(&driver).await;
+    let seq = drive.send_json(&cmd).unwrap();
+    assert_eq!(ack_of(&mut replies, &drive_path, seq).await.0, AckStatus::Ok);
+
+    // Someone else's e-stop stops the robot, and drive commands from the
+    // holder are refused from then on.
+    let mut other_replies = other.replies();
+    let seq = other.channel(estop_path.clone()).send_json(&serde_json::json!({})).unwrap();
+    assert_eq!(ack_of(&mut other_replies, &estop_path, seq).await.0, AckStatus::Ok);
+    assert!(motion.0.lock().unwrap().last().unwrap().starts_with("stop: e-stop"));
+    let seq = drive.send_json(&cmd).unwrap();
+    let (status, detail) = ack_of(&mut replies, &drive_path, seq).await;
+    assert_eq!(status, AckStatus::Rejected);
+    assert!(detail.contains("e-stopped"), "{detail}");
+
+    // A claim right after the e-stop may have raced it: still stopped.
+    held.release().await.unwrap();
+    let held = hold(&driver).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let seq = drive.send_json(&cmd).unwrap();
+    assert_eq!(ack_of(&mut replies, &drive_path, seq).await.0, AckStatus::Rejected);
+
+    // The robot reconnects: the relay restates the holder, which is not a
+    // claim, so it stays stopped.
+    tokio::time::sleep(tq_teleop::REARM_AFTER).await;
+    robot.close();
+    let robot = h.session("robot", Perms::robot("rover")).await;
+    robot.publish(&p).await.unwrap();
+    let mut holders = p.holders();
+    holders
+        .wait_for(|h| h["drive"].as_ref().is_some_and(|h| h.session == driver.id()))
+        .await
+        .unwrap();
+    let seq = drive.send_json(&cmd).unwrap();
+    assert_eq!(ack_of(&mut replies, &drive_path, seq).await.0, AckStatus::Rejected);
+
+    // Claimed again later: re-armed.
+    held.release().await.unwrap();
+    let _held = hold(&driver).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let seq = drive.send_json(&cmd).unwrap();
+    assert_eq!(ack_of(&mut replies, &drive_path, seq).await.0, AckStatus::Ok);
+    let applied = motion.0.lock().unwrap().iter().filter(|m| *m == "drive").count();
+    assert_eq!(applied, 2, "{:?}", motion.0.lock().unwrap());
+}
+
 #[tokio::test]
 async fn outage_takeover_and_removal() {
     let h = Harness::start().await;

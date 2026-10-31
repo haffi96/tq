@@ -111,8 +111,8 @@ pub struct Broadcast {
     pub build: Option<BuildInfo>,
     pub tracks: HashMap<String, RelayTrack>,
     online: HashMap<String, bool>,
-    /// Lock id -> holder sid.
-    holders: HashMap<String, u32>,
+    /// Lock id -> its holder.
+    holders: HashMap<String, Holding>,
     /// Owner-reported drops per track.
     dropped: HashMap<String, u64>,
     rates: HashMap<String, Rates>,
@@ -124,10 +124,19 @@ impl Broadcast {
     }
 }
 
+/// A lock's holder, and the claim it holds it under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Holding {
+    sid: u32,
+    claim: u64,
+}
+
 #[derive(Default)]
 pub struct RoomInner {
     /// Sequence number of the last event.
     seq: u64,
+    /// The last claim number given out.
+    claims: u64,
     next_sid: u32,
     next_broadcast: u16,
     pub sessions: HashMap<u32, SessionLink>,
@@ -171,13 +180,14 @@ impl RoomInner {
     /// Tells a broadcast's owner who holds `lock`.
     fn notify_holder(&self, b: &Broadcast, lock: &str) {
         if let Some(owner) = b.owner {
-            let sid = b.holders.get(lock).copied();
+            let h = b.holders.get(lock).copied();
             self.send(
                 owner,
                 Control::LockHolder {
                     lock: b.path(lock),
-                    sid,
-                    session: sid.and_then(|s| self.session_name(s)),
+                    sid: h.map(|h| h.sid),
+                    session: h.and_then(|h| self.session_name(h.sid)),
+                    claim: h.map(|h| h.claim),
                 },
             );
         }
@@ -383,7 +393,7 @@ impl Room {
                         .map(|(i, l)| LockState {
                             index: i as u16,
                             info: l.clone(),
-                            holder: b.holders.get(&l.id).and_then(|s| inner.session_name(*s)),
+                            holder: b.holders.get(&l.id).and_then(|h| inner.session_name(h.sid)),
                         })
                         .collect(),
                 }
@@ -450,18 +460,18 @@ impl Room {
     }
 
     fn free_locks(&self, inner: &mut RoomInner, sid: u32) {
-        let held: Vec<(String, String)> = inner
+        let held: Vec<(String, String, u64)> = inner
             .broadcasts
             .values()
             .flat_map(|b| {
                 b.holders
                     .iter()
-                    .filter(|(_, h)| **h == sid)
-                    .map(|(l, _)| (b.name.clone(), l.clone()))
+                    .filter(|(_, h)| h.sid == sid)
+                    .map(|(l, h)| (b.name.clone(), l.clone(), h.claim))
             })
             .collect();
         let from = inner.session_name(sid);
-        for (bname, lock) in held {
+        for (bname, lock, claim) in held {
             let b = inner.broadcasts.get_mut(&bname).expect("listed above");
             b.holders.remove(&lock);
             let path = b.path(&lock);
@@ -470,6 +480,8 @@ impl Room {
                 from: from.clone(),
                 to: None,
                 reason: LockChange::Left,
+                from_claim: Some(claim),
+                to_claim: None,
             };
             inner.notify_holder(&inner.broadcasts[&bname], &lock);
             self.emit(inner, event, now_us());
@@ -545,12 +557,14 @@ impl Room {
         for t in &b.ad.tracks {
             self.emit(inner, Event::TrackUnpublished { track: b.path(&t.id) }, now);
         }
-        for (lock, sid) in &b.holders {
+        for (lock, h) in &b.holders {
             let event = Event::LockChanged {
                 lock: b.path(lock),
-                from: inner.session_name(*sid),
+                from: inner.session_name(h.sid),
                 to: None,
                 reason: LockChange::Left,
+                from_claim: Some(h.claim),
+                to_claim: None,
             };
             self.emit(inner, event, now);
         }
@@ -675,9 +689,11 @@ impl Room {
         for (l, h) in freed {
             events.push(Event::LockChanged {
                 lock: Path::new(&name, &l),
-                from: inner.session_name(h),
+                from: inner.session_name(h.sid),
                 to: None,
                 reason: LockChange::Left,
+                from_claim: Some(h.claim),
+                to_claim: None,
             });
         }
         for e in events {
@@ -842,7 +858,7 @@ impl Room {
     /// Takes a lock: `Ok(holder)`, or `Err((holder, reason))`. The caller
     /// has checked `lock:`; `force` is checked here, since it only matters
     /// when someone else holds the lock.
-    pub fn claim(&self, sid: u32, path: &Path, force: bool) -> Result<String, (Option<String>, String)> {
+    pub fn claim(&self, sid: u32, path: &Path, force: bool) -> Result<(String, u64), (Option<String>, String)> {
         let mut inner = self.inner.lock().unwrap();
         let me = inner.session_name(sid).unwrap_or_default();
         let may_force = inner
@@ -857,9 +873,9 @@ impl Room {
         }
         let previous = b.holders.get(&path.name).copied();
         match previous {
-            Some(h) if h == sid => return Ok(me),
+            Some(h) if h.sid == sid => return Ok((me, h.claim)),
             Some(h) if !force || !may_force => {
-                let holder = inner.session_name(h);
+                let holder = inner.session_name(h.sid);
                 let reason = if force {
                     "not allowed to force this lock"
                 } else {
@@ -869,21 +885,26 @@ impl Room {
             }
             _ => {}
         }
-        b.holders.insert(path.name.clone(), sid);
+        inner.claims += 1;
+        let claim = inner.claims;
+        let b = inner.broadcasts.get_mut(&path.broadcast).expect("checked above");
+        b.holders.insert(path.name.clone(), Holding { sid, claim });
         let event = Event::LockChanged {
             lock: path.clone(),
-            from: previous.and_then(|h| inner.session_name(h)),
+            from: previous.and_then(|h| inner.session_name(h.sid)),
             to: Some(me.clone()),
             reason: if previous.is_some() {
                 LockChange::Forced
             } else {
                 LockChange::Claimed
             },
+            from_claim: previous.map(|h| h.claim),
+            to_claim: Some(claim),
         };
         inner.notify_holder(&inner.broadcasts[&path.broadcast], &path.name);
         self.emit(&mut inner, event, now_us());
-        tracing::info!(room = %self.id, lock = %path, session = %me, "lock claimed");
-        Ok(me)
+        tracing::info!(room = %self.id, lock = %path, session = %me, claim, "lock claimed");
+        Ok((me, claim))
     }
 
     /// Gives up a lock if `sid` holds it.
@@ -892,15 +913,17 @@ impl Room {
         let Some(b) = inner.broadcasts.get_mut(&path.broadcast) else {
             return false;
         };
-        if b.holders.get(&path.name) != Some(&sid) {
+        let Some(h) = b.holders.get(&path.name).copied().filter(|h| h.sid == sid) else {
             return false;
-        }
+        };
         b.holders.remove(&path.name);
         let event = Event::LockChanged {
             lock: path.clone(),
             from: inner.session_name(sid),
             to: None,
             reason: LockChange::Released,
+            from_claim: Some(h.claim),
+            to_claim: None,
         };
         inner.notify_holder(&inner.broadcasts[&path.broadcast], &path.name);
         self.emit(&mut inner, event, now_us());
@@ -932,7 +955,7 @@ impl Room {
             channel.lock.as_deref()
         };
         if let Some(lock) = lock {
-            if b.holders.get(lock) != Some(&sid) {
+            if b.holders.get(lock).map(|h| h.sid) != Some(sid) {
                 return Err("lock not held");
             }
         }

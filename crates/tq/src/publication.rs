@@ -63,6 +63,9 @@ struct WriterState {
 pub struct Holder {
     pub sid: u32,
     pub session: String,
+    /// The relay's number for this claim: a new claim by the same session
+    /// has a new one.
+    pub claim: Option<u64>,
 }
 
 /// The session a publication is currently published on, for replies.
@@ -80,6 +83,11 @@ pub struct Publication {
     online: Mutex<HashMap<String, bool>>,
     edges: broadcast::Sender<(Event, u64)>,
     holders: watch::Sender<HashMap<String, Option<Holder>>>,
+    /// Each lock's holder as last told by the relay. Unlike `holders`, kept
+    /// through outages: the relay restates holders on reconnect, and a
+    /// restatement (same claim number) is not a claim.
+    known_holders: Mutex<HashMap<String, Option<Holder>>>,
+    claims: broadcast::Sender<(String, Holder)>,
     demand: watch::Sender<HashMap<String, u32>>,
     watchdogs: HashMap<String, (Mutex<watchdog::State>, watch::Sender<WatchdogStatus>)>,
     keyframes: broadcast::Sender<String>,
@@ -121,6 +129,8 @@ impl Publication {
             dropped: ad.tracks.iter().map(|_| AtomicU64::new(0)).collect(),
             online: Mutex::new(ad.tracks.iter().map(|t| (t.id.clone(), false)).collect()),
             holders: watch::channel(ad.locks.iter().map(|l| (l.id.clone(), None)).collect()).0,
+            known_holders: Mutex::default(),
+            claims: broadcast::channel(16).0,
             demand: watch::channel(HashMap::new()).0,
             edges: broadcast::channel(EDGES).0,
             keyframes: broadcast::channel(16).0,
@@ -269,6 +279,14 @@ impl Publication {
 
     /// Subscribers per track. A track nobody subscribes to is not sent;
     /// its source may pause.
+    /// Each new claim of one of this broadcast's locks: `(lock, holder)`,
+    /// one per claim even when they come quickly (a release and a claim by
+    /// the same session are two changes). The relay restating holders after
+    /// an outage is not a claim.
+    pub fn claims(&self) -> broadcast::Receiver<(String, Holder)> {
+        self.claims.subscribe()
+    }
+
     pub fn demand(&self) -> watch::Receiver<HashMap<String, u32>> {
         self.demand.subscribe()
     }
@@ -341,6 +359,17 @@ impl Publication {
 
     pub(crate) fn set_holder(&self, lock: &str, holder: Option<Holder>) {
         let sid = holder.as_ref().map(|h| h.sid);
+        let previous = self
+            .known_holders
+            .lock()
+            .unwrap()
+            .insert(lock.to_string(), holder.clone())
+            .flatten();
+        if let Some(h) = &holder {
+            if previous.as_ref() != Some(h) {
+                let _ = self.claims.send((lock.to_string(), h.clone()));
+            }
+        }
         self.holders.send_modify(|h| {
             h.insert(lock.to_string(), holder);
         });

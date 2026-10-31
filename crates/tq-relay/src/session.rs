@@ -226,20 +226,23 @@ async fn control_loop(ctx: Ctx, mut rx: ControlRx) -> anyhow::Result<()> {
                         ok: false,
                         holder: None,
                         reason: Some("not allowed to claim this lock".into()),
+                        claim: None,
                     }
                 } else {
                     match room.claim(ctx.sid, &lock, force) {
-                        Ok(holder) => Control::ClaimResult {
+                        Ok((holder, claim)) => Control::ClaimResult {
                             lock,
                             ok: true,
                             holder: Some(holder),
                             reason: None,
+                            claim: Some(claim),
                         },
                         Err((holder, reason)) => Control::ClaimResult {
                             lock,
                             ok: false,
                             holder,
                             reason: Some(reason),
+                            claim: None,
                         },
                     }
                 };
@@ -252,6 +255,7 @@ async fn control_loop(ctx: Ctx, mut rx: ControlRx) -> anyhow::Result<()> {
                     ok,
                     holder: None,
                     reason: None,
+                    claim: None,
                 });
             }
             Control::Ping { id, t0_us } => ctx.send(Control::Pong {

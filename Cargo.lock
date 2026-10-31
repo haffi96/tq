@@ -7215,6 +7215,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "tq",
+ "tq-teleop",
  "tq-transport",
  "tq-wire",
  "tracing",

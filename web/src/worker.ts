@@ -45,7 +45,9 @@ export type ToWorker =
   | { type: 'canvas'; track: Path; canvas: OffscreenCanvas }
   | { type: 'control'; msg: Control }
   /** One JSON message on a channel (`<broadcast>/<channel>`). */
-  | { type: 'message'; channel: Path; body: unknown };
+  | { type: 'message'; channel: Path; body: unknown }
+  /** An e-stop: sent again every ESTOP_RETRY_MS until acked. */
+  | { type: 'estop'; channel: Path; body: unknown };
 
 export interface Window {
   avg: number | null;
@@ -84,6 +86,8 @@ export type FromWorker =
   | { type: 'status'; state: 'connecting' | 'connected' | 'closed'; detail?: string }
   | { type: 'control'; msg: Control }
   | { type: 'room'; msg: RoomMessage }
+  /** How an e-stop went: acked by the robot, or not within ESTOP_GIVE_UP_MS. */
+  | { type: 'estop'; channel: Path; acked: boolean; status?: string; detail?: string }
   /** One message of a subscribed JSON data track, and its capture time
    *  on this machine's clock (Unix µs; arrival time when unknown). */
   | { type: 'data'; track: Path; value: unknown; atUs: number }
@@ -723,6 +727,7 @@ async function readDatagrams(t: WebTransport) {
     }
     const rtt = (nowUs() - d.echoUs) / 1000;
     if (d.type === 'ack') {
+      estopAcked(d.broadcast, d.channel, d.seq, d.status, d.detail);
       teleop.ackRtt.add(rtt);
       teleop.acks[d.status] = (teleop.acks[d.status] ?? 0) + 1;
       if (d.detail) teleop.lastAckDetail = d.detail;
@@ -733,14 +738,55 @@ async function readDatagrams(t: WebTransport) {
   }
 }
 
-// A JSON message on `<broadcast>/<channel>`, by the room's indices.
-function sendMessage(channel: Path, body: unknown) {
+// A JSON message on `<broadcast>/<channel>`, by the room's indices; its
+// sequence number, or null if it could not be sent.
+function sendMessage(channel: Path, body: unknown): number | null {
   const [bname, cname] = channel.split('/');
   const b = room?.broadcasts.find((x) => x.name === bname);
   const c = b?.channels.find((x) => x.info.id === cname);
+  if (!b || !c) return null;
+  const seq = nextSeq(channel);
+  const d = encodeJsonMessage(b.index, c.index, seq, nowUs(), body);
+  if (!d) return null;
+  sendDatagram(d);
+  return seq;
+}
+
+// E-stops go as datagrams, which can be lost: each is sent again until the
+// robot acks one of its copies (the robot treats repeats as one press).
+const ESTOP_RETRY_MS = 50;
+const ESTOP_GIVE_UP_MS = 2000;
+const estops = new Map<Path, { seqs: Set<number>; timer: ReturnType<typeof setInterval> }>();
+
+function sendEstop(channel: Path, body: unknown) {
+  const previous = estops.get(channel);
+  if (previous) clearInterval(previous.timer);
+  const seqs = new Set<number>();
+  const giveUp = performance.now() + ESTOP_GIVE_UP_MS;
+  const attempt = () => {
+    const seq = sendMessage(channel, body);
+    if (seq !== null) seqs.add(seq);
+    if (performance.now() >= giveUp) {
+      clearInterval(entry.timer);
+      estops.delete(channel);
+      post({ type: 'estop', channel, acked: false });
+    }
+  };
+  const entry = { seqs, timer: setInterval(attempt, ESTOP_RETRY_MS) };
+  estops.set(channel, entry);
+  attempt();
+}
+
+function estopAcked(broadcast: number, channel: number, seq: number, status: string, detail: string) {
+  const b = broadcastAt(broadcast);
+  const c = b?.channels.find((x) => x.index === channel);
   if (!b || !c) return;
-  const d = encodeJsonMessage(b.index, c.index, nextSeq(channel), nowUs(), body);
-  if (d) sendDatagram(d);
+  const p = path(b.name, c.info.id);
+  const entry = estops.get(p);
+  if (!entry?.seqs.has(seq)) return;
+  clearInterval(entry.timer);
+  estops.delete(p);
+  post({ type: 'estop', channel: p, acked: true, status, detail });
 }
 
 function sendHeartbeats() {
@@ -850,6 +896,9 @@ scope.onmessage = (e) => {
       break;
     case 'message':
       sendMessage(msg.channel, msg.body);
+      break;
+    case 'estop':
+      sendEstop(msg.channel, msg.body);
       break;
   }
 };

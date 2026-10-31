@@ -32,6 +32,13 @@ const CLOCK_WAIT: Duration = Duration::from_secs(1);
 
 /// The lock (and the channel behind it) an operator drives with.
 pub const DRIVE: &str = "drive";
+/// The channel that stops a robot, whoever drives it.
+pub const ESTOP: &str = "estop";
+/// E-stops go as datagrams, which can be lost: each is sent again this
+/// often until the robot acks one (it treats repeats as one press)...
+const ESTOP_RETRY: Duration = Duration::from_millis(50);
+/// ...for this long.
+const ESTOP_GIVE_UP: Duration = Duration::from_secs(2);
 /// A broadcast's latest status (JSON; teleop's state under `teleop`).
 pub const STATUS: &str = ".status";
 /// A broadcast's own event log (JSON stream).
@@ -195,18 +202,18 @@ impl Shared {
     }
 
     /// Claims the drive lock (taking it from its holder with `force`) and
-    /// heartbeats it while held.
+    /// heartbeats it while held. Claiming it while holding it claims it
+    /// anew, which re-arms a robot after an e-stop.
     pub fn claim(self: &Arc<Self>, force: bool) {
         let Some((session, lock)) = self.drive_target() else {
             return;
         };
-        let held = self.hold.lock().unwrap().as_ref().is_some_and(|h| h.is_held() && *h.lock() == lock);
-        if held {
-            self.event(Event::Log(format!("Already driving {}", lock.broadcast)));
-            return;
-        }
+        let previous = self.hold.lock().unwrap().take();
         let shared = self.clone();
         self.rt.spawn(async move {
+            if let Some(h) = previous.filter(|h| h.is_held()) {
+                let _ = h.release().await;
+            }
             let line = match session.hold(lock.clone(), force, HEARTBEAT).await {
                 Ok(Ok(hold)) => {
                     *shared.hold.lock().unwrap() = Some(hold);
@@ -235,6 +242,32 @@ impl Shared {
                 shared.event(Event::Log(format!("Release failed: {e:#}")));
             }
         });
+    }
+
+    /// E-stop: every robot in the room safe-stops, whoever drives it, and
+    /// stays stopped until its drive lock is claimed again. This app lets
+    /// go of its own drive lock too.
+    pub fn estop(self: &Arc<Self>) {
+        let targets: Vec<Path> = self
+            .client
+            .room()
+            .borrow()
+            .broadcasts
+            .iter()
+            .filter(|b| b.channel(ESTOP).is_some())
+            .map(|b| Path::new(&b.name, ESTOP))
+            .collect();
+        if targets.is_empty() {
+            self.event(Event::Log("E-STOP: no broadcast with an estop channel".into()));
+        }
+        for channel in targets {
+            self.rt.spawn(send_estop(self.clone(), channel));
+        }
+        if let Some(hold) = self.hold.lock().unwrap().take() {
+            self.rt.spawn(async move {
+                let _ = hold.release().await;
+            });
+        }
     }
 
     /// One message on the drive channel, outside the 20 Hz stream.
@@ -530,6 +563,46 @@ async fn read_replies(shared: Arc<Shared>, mut rx: broadcast::Receiver<Reply>) {
                 t.heartbeat_rtt.add(rtt_us as f64 / 1000.0);
                 t.tripped = Some(tripped);
             }
+        }
+    }
+}
+
+/// Sends an e-stop until the robot acks it, on whichever session is up.
+async fn send_estop(shared: Arc<Shared>, channel: Path) {
+    let mut replies = shared.client.replies();
+    let body = serde_json::json!({ "reason": "console" });
+    let mut sent = HashSet::new();
+    let give_up = Instant::now() + ESTOP_GIVE_UP;
+    let mut tick = tokio::time::interval(ESTOP_RETRY);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                if Instant::now() >= give_up {
+                    shared.event(Event::Log(format!("E-STOP {channel}: NO ANSWER from the robot in 2 s")));
+                    return;
+                }
+                if let Some(s) = shared.session() {
+                    if let Ok(seq) = s.channel(channel.clone()).send_json(&body) {
+                        sent.insert((s.id().to_string(), seq));
+                    }
+                }
+            }
+            r = replies.recv() => match r {
+                Ok(Reply::Ack { channel: c, seq, status, detail, .. }) if c == channel => {
+                    let Some(s) = shared.session() else { continue };
+                    if !sent.contains(&(s.id().to_string(), seq)) {
+                        continue;
+                    }
+                    let line = match status {
+                        tq_wire::AckStatus::Ok => format!("E-STOP {channel}: robot stopped"),
+                        other => format!("E-STOP {channel}: robot answered {other:?} {detail}"),
+                    };
+                    shared.event(Event::Log(line));
+                    return;
+                }
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => return,
+            },
         }
     }
 }

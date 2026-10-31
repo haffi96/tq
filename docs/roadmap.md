@@ -62,12 +62,12 @@ Expect:
 - every drive command acked `Ok`;
 - `deadman_tripped: false`.
 
-**Open decision:** E-stop. The web console has an E-stop button that sends
-on the robot's open `estop` channel; that channel needs no lock, so it can
-stop a robot someone else is driving. tq-app has no such button: its Space
-key only releases the drive lock. Either keep the button and add it to
-tq-app, or remove it. This is a safety behaviour change, so it is the
-user's call.
+**E-stop (decided 2026-10-31):** an e-stop stops the robot under all
+circumstances. Both consoles' E-STOP (button and Space) send on every
+robot's `estop` channel until acked, and let go of their own drive lock.
+The robot latches: it rejects drive commands until its drive lock is
+claimed again (Claim while holding re-claims). Release is the separate,
+non-stopping way to let go. See the Watchdog section of protocol-3.md.
 
 **Consoles today** drive only the first broadcast in a room that has a
 `drive` lock, and show only video tracks plus `.status` and `.events`.

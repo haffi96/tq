@@ -349,13 +349,20 @@ acks) is planned for 3.1 as `"mode": "reliable"` on the channel.
 ```text
 session -> relay: claim   { lock: "rover-7/drive", force }
                   release { lock }
-relay -> session: claim_result { lock, ok, holder, reason }
-relay -> owner:   lock_holder  { lock, sid, session }          (null = free)
-event:            lock_changed { lock, from, to, reason }
+relay -> session: claim_result { lock, ok, holder, reason, claim }
+relay -> owner:   lock_holder  { lock, sid, session, claim }   (null = free)
+event:            lock_changed { lock, from, to, reason, from_claim, to_claim }
                   reason: claimed | forced | released | left
 ```
 
-The relay owns locks. A holder's session ending frees its locks. Claiming
+The relay owns locks. It numbers claims (`claim`, a `u64` that only
+grows), so a new claim differs from an old one even when the same session
+makes both, and from the relay restating holders to an owner that
+reconnects. `claim_result` gives the claimant its number; `lock_changed`
+carries the claim that ended (`from_claim`) and the one that began
+(`to_claim`). Claim results travel on the control stream and lock events
+on the events stream, so they can arrive in either order: a holder
+follows its own claim by number, not by session. A holder's session ending frees its locks. Claiming
 needs `lock:` (or `force:`); taking a held lock needs `force:` and
 `force: true`. Holders survive an owner's outage: when the owner comes
 back, it is told the current holders again. The room state lists each
@@ -376,6 +383,14 @@ It stays tripped until the next accepted message (the owner's app acks it
 `ok`). Trips and clears are reported on the holder's echoes and on the
 broadcast's `.events` track. Teleop's dead-man switch is exactly this, on
 the `drive` lock (`crates/tq-teleop`).
+
+Teleop adds an e-stop on top (an application convention, not part of the
+wire): a message on the open `estop` channel stops the robot whoever
+drives it, and latches. Drive commands are rejected until the drive lock
+is claimed again, at least 500 ms after the e-stop (a claim made around
+the same time may have raced it). Consoles send an e-stop again every
+50 ms until it is acked, since a datagram can be lost; the robot treats
+repeats within 500 ms as one press.
 
 ## Room state and events
 

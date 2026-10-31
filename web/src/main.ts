@@ -407,17 +407,34 @@ function lockMsg(type: 'claim' | 'release', force = false) {
   send({ type: 'control', msg: type === 'claim' ? { type, lock, force } : { type, lock } });
 }
 
+// E-stop: every robot in the room safe-stops, whoever drives it, and stays
+// stopped until its drive lock is claimed again. This console stops
+// sending and lets go of its own lock too.
+function estop() {
+  keys.clear();
+  streaming = false;
+  $<HTMLInputElement>('stream').checked = false;
+  const targets = state?.broadcasts.filter((b) => b.channels.some((c) => c.info.id === ESTOP)) ?? [];
+  if (!targets.length) log('E-STOP: no broadcast with an estop channel (not connected?)');
+  for (const b of targets) {
+    send({ type: 'estop', channel: path(b.name, ESTOP), body: { reason: 'console' } });
+  }
+  const mine = driveTarget()?.locks.find((l) => l.info.id === DRIVE)?.holder === session;
+  if (mine && session) lockMsg('release');
+}
+
 function setupOperator() {
   $('operator').hidden = false;
-  $('claim').onclick = () => lockMsg('claim');
+  // Claiming while holding claims anew: that re-arms a robot after an
+  // e-stop.
+  $('claim').onclick = () => {
+    if (driveTarget()?.locks.find((l) => l.info.id === DRIVE)?.holder === session && session) lockMsg('release');
+    lockMsg('claim');
+  };
   $('force').onclick = () => lockMsg('claim', true);
   $('release').onclick = () => lockMsg('release');
   $('once').onclick = sendDrive;
-  $('estop').onclick = () => {
-    const target = state?.broadcasts.find((b) => b.channels.some((c) => c.info.id === ESTOP));
-    if (!target) return log('no broadcast with an estop channel');
-    send({ type: 'message', channel: path(target.name, ESTOP), body: { reason: 'console' } });
-  };
+  $('estop').onclick = estop;
   const stream = $<HTMLInputElement>('stream');
   stream.onchange = () => (streaming = stream.checked);
   window.addEventListener('keydown', (e) => {
@@ -427,11 +444,7 @@ function setupOperator() {
       e.preventDefault();
     }
     if (k === ' ') {
-      // Emergency stop: drop the lock; the robot trips immediately.
-      keys.clear();
-      streaming = false;
-      stream.checked = false;
-      lockMsg('release');
+      estop();
       e.preventDefault();
     }
   });
@@ -462,6 +475,13 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
       break;
     case 'data':
       onData(msg.track, msg.value, msg.atUs);
+      break;
+    case 'estop':
+      log(
+        msg.acked
+          ? `E-STOP ${msg.channel}: robot ${msg.status === 'ok' ? 'stopped' : `answered ${msg.status} ${msg.detail ?? ''}`}`
+          : `E-STOP ${msg.channel}: NO ANSWER from the robot in 2 s`,
+      );
       break;
     case 'stats': {
       for (const [p, s] of Object.entries(msg.cameras)) renderCameraStats(p, s);

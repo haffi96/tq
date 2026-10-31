@@ -4,7 +4,10 @@
 //!   time, with a watchdog on the lock: the dead-man switch. The robot is
 //!   safe-stopped unless the lock's holder is alive and sending (see
 //!   [`tq::WatchdogStatus`]);
-//! - an `estop` channel anyone allowed to write may use;
+//! - an `estop` channel anyone allowed to write may use, whoever drives.
+//!   An e-stop latches: the robot safe-stops and refuses drive commands
+//!   until the drive lock is claimed again (at least [`REARM_AFTER`] after
+//!   the e-stop, so a claim racing it cannot cancel it);
 //! - `.status` and `.events` data tracks the consoles show.
 //!
 //! The robot side adds these to its broadcast with [`advertise`], then
@@ -15,9 +18,12 @@
 //! 0.5, "steer": -0.2}}`. Commands are latest-wins; the SDK acks stale
 //! sequence numbers as superseded before they get here.
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering::Relaxed},
-    Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +36,11 @@ use tq::{
 /// The drive channel, and the lock that guards it.
 pub const DRIVE: &str = "drive";
 pub const ESTOP: &str = "estop";
+
+/// A claim of the drive lock re-arms an e-stop only this long after it.
+/// The claim and the e-stop reach the robot on different streams, in
+/// either order; a claim made around the same time must not undo it.
+pub const REARM_AFTER: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +79,11 @@ pub fn advertise(ad: &mut Advertisement, cfg: &Config) {
             message_stale_ms: cfg.command_stale_ms,
         }),
     });
+    advertise_status(ad);
+}
+
+/// Adds the `.status` and `.events` tracks (unless already there).
+pub fn advertise_status(ad: &mut Advertisement) {
     for (id, label, delivery) in [
         (".status", "Status", Delivery::Latest),
         (".events", "Events", Delivery::Stream),
@@ -134,6 +150,10 @@ pub struct Teleop {
     commands: AtomicU64,
     estops: AtomicU64,
     last_seq: Mutex<u32>,
+    /// The latched e-stop: why, and when.
+    estop: Mutex<Option<(String, Instant)>>,
+    /// The drive lock's watchdog, as last seen.
+    watchdog: Mutex<tq::WatchdogStatus>,
     status: watch::Sender<Status>,
 }
 
@@ -151,6 +171,8 @@ impl Teleop {
             commands: AtomicU64::new(0),
             estops: AtomicU64::new(0),
             last_seq: Mutex::new(0),
+            estop: Mutex::new(None),
+            watchdog: Mutex::default(),
             status: watch::channel(Status {
                 tripped: true,
                 reason: "no holder".into(),
@@ -159,6 +181,7 @@ impl Teleop {
             .0,
         });
         tokio::spawn(follow(Arc::downgrade(&t), watchdog, p.holders()));
+        tokio::spawn(rearm(Arc::downgrade(&t), p.claims()));
         Ok(t)
     }
 
@@ -171,6 +194,10 @@ impl Teleop {
     pub fn handle(&self, msg: Message) -> Option<Message> {
         match msg.channel.as_str() {
             DRIVE => {
+                if self.estop.lock().unwrap().is_some() {
+                    msg.reject("e-stopped: claim the drive lock again to re-arm");
+                    return None;
+                }
                 let cmd: Command = match msg.json() {
                     Ok(c) => c,
                     Err(e) => {
@@ -191,13 +218,24 @@ impl Teleop {
             }
             ESTOP => {
                 let reason = format!("e-stop from session {}", msg.from_sid);
+                // Stop first; everything else is bookkeeping.
                 self.sink.safe_stop(&reason);
-                self.estops.fetch_add(1, Relaxed);
-                if let Some(events) = self.p.data(".events") {
-                    events.send_json(&serde_json::json!({ "type": "estop", "from_sid": msg.from_sid }));
-                }
+                // Consoles repeat an e-stop until it is acked: a repeat
+                // within REARM_AFTER is the same press.
+                let repeat = {
+                    let mut e = self.estop.lock().unwrap();
+                    let repeat = e.as_ref().is_some_and(|(_, at)| at.elapsed() < REARM_AFTER);
+                    *e = Some((reason, Instant::now()));
+                    repeat
+                };
                 msg.accept();
-                self.refresh();
+                if !repeat {
+                    self.estops.fetch_add(1, Relaxed);
+                    if let Some(events) = self.p.data(".events") {
+                        events.send_json(&serde_json::json!({ "type": "estop", "from_sid": msg.from_sid }));
+                    }
+                }
+                self.publish();
                 None
             }
             _ => Some(msg),
@@ -210,6 +248,53 @@ impl Teleop {
             s.estops = self.estops.load(Relaxed);
             s.last_seq = *self.last_seq.lock().unwrap();
         });
+    }
+
+    /// The status from the watchdog and the e-stop latch: stopped if
+    /// either says so.
+    fn publish(&self) {
+        let w = self.watchdog.lock().unwrap().clone();
+        let estop = self.estop.lock().unwrap().as_ref().map(|(r, _)| r.clone());
+        self.status.send_modify(|s| {
+            (s.tripped, s.reason) = match estop {
+                Some(r) => (true, r),
+                None => (w.tripped, w.reason),
+            };
+            s.commands = self.commands.load(Relaxed);
+            s.estops = self.estops.load(Relaxed);
+            s.last_seq = *self.last_seq.lock().unwrap();
+        });
+    }
+
+    /// A claim of the drive lock re-arms a latched e-stop, unless it may
+    /// have raced it.
+    fn claimed(&self, holder: &str) {
+        let mut e = self.estop.lock().unwrap();
+        if e.as_ref().is_some_and(|(_, at)| at.elapsed() >= REARM_AFTER) {
+            *e = None;
+            drop(e);
+            if let Some(events) = self.p.data(".events") {
+                events.send_json(&serde_json::json!({ "type": "estop_cleared", "holder": holder }));
+            }
+        }
+    }
+}
+
+/// Re-arms a latched e-stop on each new claim of the drive lock.
+async fn rearm(t: std::sync::Weak<Teleop>, mut claims: tokio::sync::broadcast::Receiver<(String, tq::Holder)>) {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match claims.recv().await {
+            Ok((lock, holder)) if lock == DRIVE => {
+                let Some(t) = t.upgrade() else { return };
+                t.claimed(&holder.session);
+                t.publish();
+            }
+            Ok(_) => {}
+            // Missed claims only ever leave it stopped.
+            Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => return,
+        }
     }
 }
 
@@ -233,11 +318,9 @@ async fn follow(
                 t.sink.safe_stop(&w.reason);
             }
             was_tripped = w.tripped;
-            t.status.send_modify(|s| {
-                s.tripped = w.tripped;
-                s.reason = w.reason.clone();
-                s.holder = holder;
-            });
+            *t.watchdog.lock().unwrap() = w;
+            t.status.send_modify(|s| s.holder = holder);
+            t.publish();
         }
         tokio::select! {
             r = watchdog.changed() => if r.is_err() { return },

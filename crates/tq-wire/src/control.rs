@@ -389,12 +389,20 @@ pub enum Control {
         holder: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The claim this session now holds the lock under (see
+        /// `LockHolder::claim`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim: Option<u64>,
     },
     /// Relay -> owner: who holds one of its locks now.
     LockHolder {
         lock: Path,
         sid: Option<u32>,
         session: Option<String>,
+        /// Which claim: the relay numbers claims, so a new claim (even by
+        /// the same session) differs from the relay restating the holder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim: Option<u64>,
     },
 
     /// Relay -> session: QUIC stats of its connection.

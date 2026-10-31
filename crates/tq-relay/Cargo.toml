@@ -29,3 +29,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 tq = { workspace = true }
+tq-teleop = { workspace = true }

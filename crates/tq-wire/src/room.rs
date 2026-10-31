@@ -239,6 +239,11 @@ pub enum Event {
         from: Option<String>,
         to: Option<String>,
         reason: LockChange,
+        /// The claim that ended, and the one that began.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_claim: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_claim: Option<u64>,
     },
     /// An event type from a newer minor of the protocol. Never sent.
     #[serde(other)]
@@ -325,6 +330,8 @@ mod tests {
                 from: None,
                 to: Some("abc".into()),
                 reason: LockChange::Claimed,
+                from_claim: None,
+                to_claim: Some(1),
             },
         }));
         assert!(json.starts_with(

@@ -536,10 +536,11 @@ impl Session {
         Ok(seq)
     }
 
-    /// Claims a lock. `Ok(Err(_))` when someone else holds it (or the
-    /// relay refused). Holding it means heartbeating it; [`Session::hold`]
-    /// does both.
-    pub async fn claim(&self, lock: Path, force: bool) -> anyhow::Result<Result<(), Refused>> {
+    /// Claims a lock; `Ok(Ok(claim))` with the relay's number for this
+    /// claim, `Ok(Err(_))` when someone else holds it (or the relay
+    /// refused). Holding it means heartbeating it; [`Session::hold`] does
+    /// both.
+    pub async fn claim(&self, lock: Path, force: bool) -> anyhow::Result<Result<u64, Refused>> {
         let want = lock.clone();
         self.request(Control::Claim { lock, force }, |m| match m {
             Control::ClaimResult {
@@ -547,8 +548,9 @@ impl Session {
                 ok,
                 holder,
                 reason,
+                claim,
             } if *lock == want => Some(match ok {
-                true => Ok(()),
+                true => Ok(claim.unwrap_or(0)),
                 false => Err(Refused {
                     holder: holder.clone(),
                     reason: reason.clone().unwrap_or_default(),
@@ -575,11 +577,12 @@ impl Session {
     pub async fn hold(&self, lock: Path, force: bool, interval: Duration) -> anyhow::Result<Result<Hold, Refused>> {
         // Subscribed first, so a forced take right after the claim is seen.
         let events = self.events();
-        if let Err(refused) = self.claim(lock.clone(), force).await? {
-            return Ok(Err(refused));
-        }
+        let claim = match self.claim(lock.clone(), force).await? {
+            Ok(claim) => claim,
+            Err(refused) => return Ok(Err(refused)),
+        };
         let (held_tx, held) = watch::channel(true);
-        let task = tokio::spawn(heartbeat(self.clone(), lock.clone(), interval, events, held_tx));
+        let task = tokio::spawn(heartbeat(self.clone(), lock.clone(), claim, interval, events, held_tx));
         Ok(Ok(Hold {
             lock,
             session: self.clone(),
@@ -750,20 +753,17 @@ impl Drop for Hold {
     }
 }
 
-/// Heartbeats `lock` until it is no longer this session's.
+/// Heartbeats `lock` until `claim` ends: released, taken by force, or
+/// this session ended.
 async fn heartbeat(
     session: Session,
     lock: Path,
+    claim: u64,
     interval: Duration,
     mut events: broadcast::Receiver<RoomEvent>,
     held: watch::Sender<bool>,
 ) {
-    let me = session.id().to_string();
-    let mut room = session.room();
     let mut tick = tokio::time::interval(interval);
-    // The claim's result and the state that shows it travel on different
-    // streams: the state counts only once it has shown this session.
-    let mut seen = false;
     loop {
         tokio::select! {
             _ = tick.tick() => {
@@ -771,29 +771,23 @@ async fn heartbeat(
                     break;
                 }
             }
-            r = room.changed() => {
-                if r.is_err() {
-                    break;
-                }
-                let holder = room.borrow_and_update().lock(&lock).map(|l| l.holder.clone());
-                match holder {
-                    Some(Some(h)) if h == me => seen = true,
-                    // Gone from the room, or someone else's (or free) after
-                    // having been ours.
-                    None => break,
-                    Some(_) if seen => break,
-                    Some(_) => {}
-                }
-            }
             e = events.recv() => match e {
+                // Claims are numbered: events about an earlier claim by this
+                // session (a release just before) do not end this one.
                 Ok(e) => {
-                    if let tq_wire::Event::LockChanged { lock: l, from: Some(from), .. } = &e.event {
-                        if *l == lock && *from == me {
+                    if let tq_wire::Event::LockChanged { lock: l, from_claim, .. } = &e.event {
+                        if *l == lock && *from_claim == Some(claim) {
                             break;
                         }
                     }
                 }
-                Err(RecvError::Lagged(_)) => {}
+                // Events were missed: the room's state says who holds it.
+                Err(RecvError::Lagged(_)) => {
+                    let holder = session.room().borrow().lock(&lock).map(|l| l.holder.clone());
+                    if holder != Some(Some(session.id().to_string())) {
+                        break;
+                    }
+                }
                 Err(RecvError::Closed) => break,
             },
             _ = session.closed() => break,
@@ -917,11 +911,17 @@ async fn read_control(inner: Arc<Inner>, mut rx: ControlRx) -> anyhow::Result<()
                 inner.clock.lock().unwrap().add(relay_minus_me, rtt);
                 continue;
             }
-            Control::LockHolder { lock, sid, session } => {
+            Control::LockHolder {
+                lock,
+                sid,
+                session,
+                claim,
+            } => {
                 if let Some(p) = inner.publication(&lock.broadcast) {
                     let holder = sid.map(|sid| Holder {
                         sid,
                         session: session.clone().unwrap_or_default(),
+                        claim: *claim,
                     });
                     p.set_holder(&lock.name, holder);
                 }

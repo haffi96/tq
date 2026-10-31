@@ -398,7 +398,9 @@ impl Model {
             RoomEvent::TrackOnline { track } => format!("Track {track} online"),
             RoomEvent::TrackOffline { track, reason } if reason.is_empty() => format!("Track {track} offline"),
             RoomEvent::TrackOffline { track, reason } => format!("Track {track} offline: {reason}"),
-            RoomEvent::LockChanged { lock, from, to, reason } => match (reason, from, to) {
+            RoomEvent::LockChanged {
+                lock, from, to, reason, ..
+            } => match (reason, from, to) {
                 (LockChange::Claimed, _, Some(to)) => format!("{} took {lock}", self.who(to)),
                 (LockChange::Forced, Some(from), Some(to)) => {
                     format!("{} took {lock} from {}", self.who(to), self.who(from))
@@ -448,13 +450,15 @@ impl Model {
         cx.notify();
     }
 
-    /// Emergency stop: drop the drive lock; the robot trips at once.
+    /// Emergency stop: every robot in the room safe-stops, whoever drives
+    /// it, until its drive lock is claimed again. Stops sending, and lets
+    /// go of this app's own drive lock.
     pub fn estop(&mut self, cx: &mut Context<Self>) {
         self.keys.clear();
         self.streaming = false;
         self.update_drive(cx);
-        self.release();
-        self.push_log("E-stop: drive lock released".into());
+        self.shared.estop();
+        self.push_log("E-STOP sent".into());
     }
 }
 
