@@ -27,7 +27,7 @@ variable "machine_type" {
 variable "relay_image" {
   description = "Relay container image. Read at each service start: change it, apply, then `sudo systemctl restart tq-relay` on the VM."
   type        = string
-  default     = "ghcr.io/haffi96/tq-relay:0.2.0"
+  default     = "ghcr.io/haffi96/tq-relay:0.3.0"
 }
 
 variable "relay_hostname" {
