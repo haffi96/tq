@@ -173,7 +173,13 @@ async fn control_loop(ctx: Ctx, mut rx: ControlRx) -> anyhow::Result<()> {
                     continue;
                 }
                 tracing::info!(room = %room.id, sid = ctx.sid, broadcast = %name, tracks = ad.tracks.len(), channels = ad.channels.len(), locks = ad.locks.len(), "advertised");
-                let done = room.advertise(ctx.sid, ad, Some(ctx.build.clone()));
+                let done = match room.advertise(ctx.sid, ad, Some(ctx.build.clone())) {
+                    Ok(done) => done,
+                    Err(e) => {
+                        ctx.send(refuse(e));
+                        continue;
+                    }
+                };
                 if let Some(prev) = done.replaced {
                     replaced(room, prev, &name);
                 }

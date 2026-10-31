@@ -34,6 +34,9 @@ use tq_wire::{
 const EVENT_BUFFER: usize = 256;
 const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
+/// Broadcasts per room, including those waiting out their grace. Far
+/// below the 65,536 indices, so a free one always exists.
+const MAX_BROADCASTS: usize = 4096;
 
 /// Control messages to one session, in order.
 pub type Outbox = mpsc::UnboundedSender<Control>;
@@ -583,10 +586,19 @@ impl Room {
     /// Makes `sid` the owner of `ad.broadcast` (new, returning after an
     /// outage, re-advertising, or taking over from another session) and
     /// applies what changed. The caller has checked `pub` and validated.
-    pub fn advertise(self: &Arc<Self>, sid: u32, ad: Advertisement, build: Option<BuildInfo>) -> Advertised {
+    /// Fails when the room is full.
+    pub fn advertise(
+        self: &Arc<Self>,
+        sid: u32,
+        ad: Advertisement,
+        build: Option<BuildInfo>,
+    ) -> Result<Advertised, String> {
         let now = now_us();
         let mut inner = self.inner.lock().unwrap();
         let name = ad.broadcast.clone();
+        if !inner.broadcasts.contains_key(&name) && inner.broadcasts.len() >= MAX_BROADCASTS {
+            return Err(format!("room is full ({MAX_BROADCASTS} broadcasts)"));
+        }
         let mut replaced = None;
         if let Some(prev) = inner.broadcasts.get(&name).and_then(|b| b.owner) {
             if prev != sid {
@@ -714,7 +726,7 @@ impl Room {
         }
         drop(inner);
         self.bump_layout();
-        Advertised { owner_index, replaced }
+        Ok(Advertised { owner_index, replaced })
     }
 
     /// Removes a broadcast its owner no longer publishes. False if `sid`

@@ -115,6 +115,11 @@ impl Options {
     /// endpoint (on `quic_host`, else the same host), its trust, and a
     /// token. Fails with [`Incompatible`] for a relay of another protocol
     /// major.
+    ///
+    /// The relay's certificate is trusted as `/api/info` says, so over
+    /// plain `http://` anyone on the path could stand in for the relay
+    /// and take the token. That is allowed only on this machine, or with
+    /// a dev token (which came over the same HTTP anyway).
     pub async fn discover(
         http: &url::Url,
         quic_host: Option<&str>,
@@ -122,6 +127,9 @@ impl Options {
         token: &Token,
         build: BuildInfo,
     ) -> anyhow::Result<Options> {
+        if http.scheme() == "http" && !matches!(token, Token::Dev { .. }) && !is_loopback(http) {
+            anyhow::bail!("{http}: use https:// to send a token (plain HTTP is only for this machine or dev tokens)");
+        }
         let info = relay_info(http).await?;
         if Compat::of_build(info.build.as_ref()) == Compat::Incompatible {
             return Err(Incompatible(tq_wire::mismatch("relay", info.build.as_ref(), &build.component)).into());
@@ -147,6 +155,15 @@ impl Options {
             quic: Default::default(),
             build,
         })
+    }
+}
+
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
     }
 }
 

@@ -162,9 +162,14 @@ pub enum Reply {
 }
 
 struct SubEntry {
+    /// Which reader this is: a newer subscription to the same track
+    /// replaces it, and only the current reader unsubscribes.
+    reader: u64,
     tx: mpsc::Sender<Frame>,
     newest_group: u64,
 }
+
+static NEXT_READER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct Inner {
     wt: wt::Session,
@@ -224,6 +229,16 @@ impl Inner {
             relay: self.relay_offset(),
             owner: self.owner_offset(broadcast),
         }
+    }
+
+    /// Removes `path`'s subscription if it is still `reader`'s.
+    fn forget_sub(&self, path: &Path, reader: u64) -> bool {
+        let mut subs = self.subs.lock().unwrap();
+        let ours = subs.get(path).is_some_and(|s| s.reader == reader);
+        if ours {
+            subs.remove(path);
+        }
+        ours
     }
 
     fn publication_at(&self, owner_index: u16) -> Option<Arc<Publication>> {
@@ -463,16 +478,21 @@ impl Session {
 
     /// Subscribes to a track. Frames arrive on the returned reader;
     /// dropping it unsubscribes. A track that does not exist yet is waited
-    /// for.
+    /// for. One reader per track per session: a new one replaces the
+    /// last, whose frames end.
     pub async fn subscribe(&self, sub: impl Into<Subscription>) -> anyhow::Result<TrackReader> {
         let sub = sub.into();
         let path = sub.track.clone();
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_QUEUE);
-        self.inner
-            .subs
-            .lock()
-            .unwrap()
-            .insert(path.clone(), SubEntry { tx, newest_group: 0 });
+        let reader = NEXT_READER.fetch_add(1, Relaxed);
+        self.inner.subs.lock().unwrap().insert(
+            path.clone(),
+            SubEntry {
+                reader,
+                tx,
+                newest_group: 0,
+            },
+        );
         let want = path.clone();
         let result = self
             .request(Control::Subscribe { tracks: vec![sub] }, |m| match m {
@@ -483,15 +503,16 @@ impl Session {
         match result {
             Ok((true, _)) => Ok(TrackReader {
                 path,
+                reader,
                 rx,
                 inner: self.inner.clone(),
             }),
             Ok((false, reason)) => {
-                self.inner.subs.lock().unwrap().remove(&path);
+                self.inner.forget_sub(&path, reader);
                 anyhow::bail!("subscribe {path}: {}", reason.unwrap_or_default())
             }
             Err(e) => {
-                self.inner.subs.lock().unwrap().remove(&path);
+                self.inner.forget_sub(&path, reader);
                 Err(e)
             }
         }
@@ -588,6 +609,7 @@ impl Session {
             session: self.clone(),
             held,
             task,
+            released: false,
         }))
     }
 
@@ -706,6 +728,8 @@ pub struct Hold {
     session: Session,
     held: watch::Receiver<bool>,
     task: tokio::task::JoinHandle<()>,
+    /// Released by [`Hold::release`]: `Drop` must not send it again.
+    released: bool,
 }
 
 impl Hold {
@@ -730,14 +754,14 @@ impl Hold {
     }
 
     /// Releases the lock and waits for the relay to confirm.
-    pub async fn release(self) -> anyhow::Result<bool> {
+    pub async fn release(mut self) -> anyhow::Result<bool> {
         self.task.abort();
         if !self.is_held() {
             return Ok(false);
         }
+        self.released = true;
         let (session, lock) = (self.session.clone(), self.lock.clone());
-        // Released here; `Drop` must not send it again.
-        std::mem::forget(self);
+        drop(self);
         session.release(lock).await
     }
 }
@@ -745,7 +769,7 @@ impl Hold {
 impl Drop for Hold {
     fn drop(&mut self) {
         self.task.abort();
-        if self.is_held() {
+        if self.is_held() && !self.released {
             self.session.inner.send(Control::Release {
                 lock: self.lock.clone(),
             });
@@ -799,6 +823,7 @@ async fn heartbeat(
 /// Frames of one subscribed track. Dropping it unsubscribes.
 pub struct TrackReader {
     path: Path,
+    reader: u64,
     rx: mpsc::Receiver<Frame>,
     inner: Arc<Inner>,
 }
@@ -820,10 +845,12 @@ impl TrackReader {
 
 impl Drop for TrackReader {
     fn drop(&mut self) {
-        self.inner.subs.lock().unwrap().remove(&self.path);
-        self.inner.send(Control::Unsubscribe {
-            tracks: vec![self.path.clone()],
-        });
+        // A reader that was replaced leaves the subscription to the new one.
+        if self.inner.forget_sub(&self.path, self.reader) {
+            self.inner.send(Control::Unsubscribe {
+                tracks: vec![self.path.clone()],
+            });
+        }
     }
 }
 

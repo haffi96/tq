@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let mut events = session.events();
         tokio::spawn(async move {
-            while let Ok(e) = events.recv().await {
+            while let Some(e) = next(&mut events).await {
                 tracing::info!(seq = e.seq, event = ?e.event, "event");
             }
         });
@@ -223,10 +223,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Subscribes to each track once it is in the room.
+/// The next message, skipping over any this receiver fell behind on.
+async fn next<T: Clone>(rx: &mut tokio::sync::broadcast::Receiver<T>) -> Option<T> {
+    loop {
+        match rx.recv().await {
+            Ok(m) => return Some(m),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => tracing::warn!(n, "fell behind"),
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+        }
+    }
+}
+
+/// Subscribes to each track once it is in the room; a failed one is
+/// tried again on the next room update.
 async fn subscribe_all(session: Session, only: Option<String>, shared: Arc<Mutex<Shared>>) {
     let mut room = session.room();
-    let mut seen = HashSet::new();
+    let seen = Arc::new(Mutex::new(HashSet::new()));
     loop {
         let paths: Vec<(Path, TrackKind)> = room
             .borrow_and_update()
@@ -236,11 +248,12 @@ async fn subscribe_all(session: Session, only: Option<String>, shared: Arc<Mutex
             .flat_map(|b| b.tracks.iter().map(|t| (Path::new(&b.name, &t.info.id), t.info.kind)))
             .collect();
         for (path, kind) in paths {
-            if seen.insert(path.clone()) {
-                let (session, shared) = (session.clone(), shared.clone());
+            if seen.lock().unwrap().insert(path.clone()) {
+                let (session, shared, seen) = (session.clone(), shared.clone(), seen.clone());
                 tokio::spawn(async move {
                     if let Err(e) = read_track(session, path.clone(), kind, shared).await {
                         tracing::warn!(track = %path, error = format!("{e:#}"), "subscription failed");
+                        seen.lock().unwrap().remove(&path);
                     }
                 });
             }
@@ -295,7 +308,7 @@ async fn send_once(session: Session, channel: Path, body: serde_json::Value) {
         Err(e) => return tracing::warn!(%channel, error = format!("{e:#}"), "send failed"),
     };
     let ack = tokio::time::timeout(Duration::from_secs(3), async {
-        while let Ok(r) = replies.recv().await {
+        while let Some(r) = next(&mut replies).await {
             if let Reply::Ack { channel: c, seq: s, status, detail, .. } = r {
                 if c == channel && s == seq {
                     return Some((status, detail));
@@ -346,7 +359,7 @@ async fn teleop(session: Session, only: Option<String>, hz: f64, shared: Arc<Mut
         let mut replies = session.replies();
         let shared = shared.clone();
         tokio::spawn(async move {
-            while let Ok(r) = replies.recv().await {
+            while let Some(r) = next(&mut replies).await {
                 let mut s = shared.lock().unwrap();
                 match r {
                     Reply::Ack { rtt_us, status, .. } => {

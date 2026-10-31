@@ -17,7 +17,8 @@
 //!
 //! A teleop sink writes a `safe_stop` first on every connect, so a motion
 //! program that (re)connects starts stopped. That program should stop by
-//! itself when the connection drops.
+//! itself when the connection drops: tq-edge drops it when a `safe_stop`
+//! cannot be queued (the program stopped reading).
 
 use std::{
     sync::{
@@ -32,7 +33,7 @@ use serde::Deserialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc,
+    sync::{mpsc, watch},
 };
 use tq::Message;
 
@@ -78,6 +79,17 @@ impl Sink {
         }
     }
 
+    /// Writes one JSON line that must not be lost: if it cannot be queued
+    /// behind what the program has not read, the connection is dropped
+    /// instead, so the program stops by itself.
+    pub fn write_or_disconnect(&self, line: &serde_json::Value) -> Result<(), String> {
+        let r = self.write(line);
+        if let (Err(_), Sink::Tcp(t)) = (&r, self) {
+            t.drop_connection();
+        }
+        r
+    }
+
     /// Hands a channel message on and acks it.
     pub fn deliver(&self, msg: Message) {
         let payload: serde_json::Value = match msg.json() {
@@ -102,6 +114,8 @@ impl Sink {
 pub struct TcpSink {
     tx: mpsc::Sender<Bytes>,
     connected: Arc<AtomicBool>,
+    /// Bumped to drop the current connection.
+    kick: watch::Sender<u64>,
 }
 
 impl TcpSink {
@@ -109,8 +123,13 @@ impl TcpSink {
         let (tx, rx) = mpsc::channel(QUEUE);
         let connected = Arc::new(AtomicBool::new(false));
         let hello = hello.map(|v| line_bytes(&v));
-        tokio::spawn(write_loop(name.to_string(), addr.to_string(), hello, rx, connected.clone()));
-        Self { tx, connected }
+        let (kick, kicked) = watch::channel(0);
+        tokio::spawn(write_loop(name.to_string(), addr.to_string(), hello, rx, kicked, connected.clone()));
+        Self { tx, connected, kick }
+    }
+
+    fn drop_connection(&self) {
+        self.kick.send_modify(|n| *n += 1);
     }
 
     fn write(&self, line: &serde_json::Value) -> Result<(), String> {
@@ -135,6 +154,7 @@ async fn write_loop(
     addr: String,
     hello: Option<Bytes>,
     mut rx: mpsc::Receiver<Bytes>,
+    mut kicked: watch::Receiver<u64>,
     connected: Arc<AtomicBool>,
 ) {
     let mut logged_down = false;
@@ -144,8 +164,10 @@ async fn write_loop(
                 logged_down = false;
                 let _ = stream.set_nodelay(true);
                 let (mut rd, mut wr) = stream.into_split();
-                // Nothing from before this connection goes out on it.
+                // Nothing from before this connection goes out on it, and
+                // no earlier kick drops it.
                 while rx.try_recv().is_ok() {}
+                kicked.borrow_and_update();
                 let ok = match &hello {
                     Some(h) => wr.write_all(h).await.is_ok(),
                     None => true,
@@ -160,10 +182,20 @@ async fn write_loop(
                         tokio::select! {
                             line = rx.recv() => {
                                 let Some(line) = line else { return };
-                                if let Err(e) = wr.write_all(&line).await {
+                                // A program that stopped reading blocks the
+                                // write; a kick still gets through.
+                                let written = tokio::select! {
+                                    r = wr.write_all(&line) => r,
+                                    _ = kicked.changed() => Err(std::io::Error::other("dropped: a safe stop could not be queued")),
+                                };
+                                if let Err(e) = written {
                                     tracing::warn!(sink = %name, error = %e, "sink write failed");
                                     break;
                                 }
+                            }
+                            _ = kicked.changed() => {
+                                tracing::warn!(sink = %name, "sink dropped: a safe stop could not be queued");
+                                break;
                             }
                             r = rd.read(&mut scratch) => if !matches!(r, Ok(n) if n > 0) {
                                 tracing::warn!(sink = %name, "sink closed");
@@ -195,10 +227,83 @@ impl tq_teleop::Sink for TeleopSink {
 
     fn safe_stop(&self, reason: &str) {
         tracing::warn!(reason, "teleop SAFE STOP");
-        if let Err(e) = self.0.write(&serde_json::json!({ "type": "safe_stop", "reason": reason })) {
-            // A motion program that is not connected must already be
-            // stopped (see the module docs).
-            tracing::warn!(error = %e, "safe stop not delivered to the sink");
+        if let Err(e) = self
+            .0
+            .write_or_disconnect(&serde_json::json!({ "type": "safe_stop", "reason": reason }))
+        {
+            // A motion program that is not connected (or was just dropped)
+            // must stop by itself (see the module docs).
+            tracing::warn!(error = %e, "safe stop not delivered to the sink; connection dropped");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{io::AsyncBufReadExt, net::TcpListener};
+    use tq_teleop::Sink as _;
+
+    /// The next connection that starts with a `safe_stop` line (the T3
+    /// Code app, among others, may probe the port first).
+    async fn next_program(l: &TcpListener) -> tokio::io::BufReader<TcpStream> {
+        loop {
+            let (s, _) = l.accept().await.unwrap();
+            let mut s = tokio::io::BufReader::new(s);
+            let mut line = String::new();
+            if s.read_line(&mut line).await.is_ok() && line.contains("safe_stop") {
+                return s;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_safe_stop_that_cannot_be_queued_drops_the_connection() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let hello = serde_json::json!({ "type": "safe_stop", "reason": "connected" });
+        let sink = TeleopSink(Sink::start("test", &SinkConfig::Tcp { addr }, Some(hello)));
+        let wait = Duration::from_secs(10);
+        let connected = || async {
+            tokio::time::timeout(wait, async {
+                while !matches!(&sink.0, Sink::Tcp(t) if t.connected.load(Relaxed)) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap()
+        };
+        let mut program = next_program(&l).await;
+        connected().await;
+
+        // The program stops reading: commands fill the socket, then the queue.
+        let big = serde_json::json!({ "pad": "x".repeat(256 << 10) });
+        let cmd = tq_teleop::Command {
+            command: "drive".into(),
+            args: big,
+        };
+        tokio::time::timeout(wait, async {
+            while sink.apply(&cmd).is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the queue never filled");
+
+        sink.safe_stop("remote stop");
+        // The connection ends (after whatever was already in flight)...
+        tokio::time::timeout(wait, async {
+            let mut buf = vec![0u8; 1 << 20];
+            while program.read(&mut buf).await.unwrap_or(0) > 0 {}
+        })
+        .await
+        .expect("the connection was not dropped");
+        // ...and the next one starts stopped, with no stale command.
+        let mut next = tokio::time::timeout(wait, next_program(&l)).await.unwrap();
+        connected().await;
+        sink.safe_stop("still stopped");
+        let mut line = String::new();
+        next.read_line(&mut line).await.unwrap();
+        assert!(line.contains("still stopped"), "{line}");
     }
 }

@@ -18,8 +18,8 @@ complete example.
   `stream` (every message, in order) or `datagram` (one QUIC datagram per
   message, for IMU-rate data), and subscribers can ask the relay to thin
   them to the rate they can show.
-- **Latency you can see.** Every frame and message carries capture, owner
-  and relay timestamps; per-hop clock offsets put them all on the viewer's
+- **Latency you can see.** Every frame and data-track message carries
+  capture, owner and relay timestamps; per-hop clock offsets put them all on the viewer's
   clock, with error bounds.
 - **Teleop from general parts.** A `drive` channel behind a `drive` lock;
   the lock's watchdog is the dead-man switch.
@@ -227,7 +227,8 @@ cargo build --release
 ```
 
 Tokens: `tq-relay token --preset operator --room robot-01` prints a token;
-`--perm sub:robot-01/front` (repeatable) narrows or adds permissions. Pass it
+`--perm sub:robot-01/front` (repeatable) adds a permission to the preset.
+For a narrow token, give only `--perm`s and no preset. Pass it
 to the page as `?token=`. Without `--dev`, the relay does not mint tokens
 over HTTP, and it never mints tokens that may publish.
 

@@ -177,10 +177,13 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let mut cfg: Config = serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-        if let Ok(s) = std::env::var("TQ_SHARED_SECRET") {
+        // Empty counts as unset: the installed edge.env has an empty
+        // `TQ_SHARED_SECRET=` for the operator to fill in.
+        let env = |k| std::env::var(k).ok().filter(|v: &String| !v.is_empty());
+        if let Some(s) = env("TQ_SHARED_SECRET") {
             cfg.relay.shared_secret = s;
         }
-        if let Ok(t) = std::env::var("TQ_TOKEN") {
+        if let Some(t) = env("TQ_TOKEN") {
             cfg.relay.token = t;
         }
         if cfg.broadcast.is_empty() {
@@ -259,6 +262,9 @@ impl Config {
         }
         if self.relay.max_lag_ms == 0 {
             problems.push("relay.max_lag_ms must be > 0".into());
+        }
+        if self.status_interval_ms == 0 {
+            problems.push("status_interval_ms must be > 0".into());
         }
         if self.tracks.is_empty() && self.channels.is_empty() && self.teleop.is_none() {
             problems.push("nothing to publish: add tracks, channels or teleop".into());

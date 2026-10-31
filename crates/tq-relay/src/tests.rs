@@ -391,6 +391,34 @@ async fn video_writer_publishes_an_encoder_stream() {
 }
 
 #[tokio::test]
+async fn a_second_reader_of_a_track_replaces_the_first() {
+    let h = Harness::start().await;
+    let robot = h.session("robot", Perms::robot("rover")).await;
+    let (p, _inbox) = Publication::new(rover(vec![data("log", Delivery::Stream)])).unwrap();
+    robot.publish(&p).await.unwrap();
+    p.set_online("log", true, "");
+    let viewer = h.session("viewer", Perms::viewer()).await;
+    let mut first = viewer.subscribe(path("rover/log")).await.unwrap();
+    let mut second = viewer.subscribe(path("rover/log")).await.unwrap();
+    // The first is told: its frames end.
+    assert!(tokio::time::timeout(WAIT, first.recv()).await.unwrap().is_none());
+    // Dropping it does not unsubscribe the second.
+    drop(first);
+    let w = p.data("log").unwrap();
+    let mut demand = p.demand();
+    demand.wait_for(|d| d.get("log") == Some(&1)).await.unwrap();
+    for i in 0..3 {
+        w.send_json(&i);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for i in 0..3 {
+        assert_eq!(frame(&mut second).await.json::<i32>().unwrap(), i);
+    }
+    drop(second);
+    demand.wait_for(|d| d.get("log") == Some(&0)).await.unwrap();
+}
+
+#[tokio::test]
 async fn permissions_are_per_path() {
     let h = Harness::start().await;
     let robot = h.session("robot", Perms::robot("rover")).await;
@@ -713,6 +741,13 @@ async fn discover_over_http() {
     assert!(tq::Options::discover(&http, None, "r1", &robot, tq_wire::build_info!("tq-test"))
         .await
         .is_err());
+    // A real token never follows trust from plain HTTP off this machine.
+    let remote: url::Url = "http://192.0.2.1:8080".parse().unwrap();
+    let given = tq::Token::Given("t".into());
+    let e = tq::Options::discover(&remote, None, "r1", &given, tq_wire::build_info!("tq-test"))
+        .await
+        .unwrap_err();
+    assert!(format!("{e}").contains("https://"), "{e}");
 }
 
 /// Records what reaches the robot's motion interface.

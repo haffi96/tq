@@ -196,8 +196,14 @@ impl Client {
 
     /// Publishes `p` on the current session and every one after it.
     pub fn publish(&self, p: &Arc<Publication>, opts: PublishOptions) {
-        self.shared.pubs.lock().unwrap().push((p.clone(), opts.clone()));
-        if let Some(session) = self.session() {
+        // Under the lock: `serve` publishes what was added before it
+        // connected, and this what was added after.
+        let session = {
+            let mut pubs = self.shared.pubs.lock().unwrap();
+            pubs.push((p.clone(), opts.clone()));
+            self.session()
+        };
+        if let Some(session) = session {
             let p = p.clone();
             tokio::spawn(async move {
                 if let Err(e) = session.publish_with(&p, opts).await {
@@ -265,13 +271,23 @@ async fn serve(shared: &Shared, session: &Session) -> String {
     // Taken first, so nothing that follows the welcome is missed.
     let (mut room, mut events, mut control, mut replies) =
         (session.room(), session.events(), session.control(), session.replies());
-    let pubs = shared.pubs.lock().unwrap().clone();
-    for (p, opts) in pubs {
-        if let Err(e) = session.publish_with(&p, opts).await {
-            tracing::warn!(broadcast = %p.name(), error = format!("{e:#}"), "publish failed");
+    let publish = async |pubs: Vec<(Arc<Publication>, PublishOptions)>| {
+        for (p, opts) in pubs {
+            if let Err(e) = session.publish_with(&p, opts).await {
+                tracing::warn!(broadcast = %p.name(), error = format!("{e:#}"), "publish failed");
+            }
         }
-    }
-    shared.conn.send_replace(Conn::Connected(session.clone()));
+    };
+    let pubs = shared.pubs.lock().unwrap().clone();
+    let published = pubs.len();
+    publish(pubs).await;
+    // Those added meanwhile; from now on `Client::publish` does it.
+    let added = {
+        let pubs = shared.pubs.lock().unwrap();
+        shared.conn.send_replace(Conn::Connected(session.clone()));
+        pubs[published..].to_vec()
+    };
+    publish(added).await;
     // A new session's room is empty until its first state: passing that
     // on would make it look as if everything had gone.
     let pass_room = |state: Arc<RoomState>| {
