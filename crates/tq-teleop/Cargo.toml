@@ -1,0 +1,14 @@
+[package]
+name = "tq-teleop"
+description = "Teleoperation on tq: drive commands on a locked channel, the dead-man watchdog, e-stop, robot status"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tq = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -1,9 +1,9 @@
-//! Sending and receiving group (GOP) streams.
+//! Sending and receiving group streams.
 
 use std::{collections::VecDeque, time::Duration};
 
 use bytes::{Bytes, BytesMut};
-use tq_proto::{code, now_us, FrameHeader, GroupHeader, MediaFrame, GROUP_HEADER_FIXED};
+use tq_wire::{code, now_us, FrameHeader, GroupHeader, MediaFrame, GROUP_HEADER_FIXED};
 use web_transport_quinn::{RecvStream, SendStream, Session};
 
 /// How a sender trades completeness for latency.
@@ -11,7 +11,7 @@ use web_transport_quinn::{RecvStream, SendStream, Session};
 pub struct SendPolicy {
     /// Older groups allowed to keep delivering after a new group starts. 0
     /// resets the previous group's stream the moment a keyframe arrives
-    /// (operator, publisher uplink); viewers can afford to let one or two
+    /// (realtime subscribers, owner uplinks); smooth subscribers can afford to let one or two
     /// finish.
     pub keep_groups: usize,
     /// A frame older than this (since it arrived on this node) is not sent;
@@ -38,11 +38,12 @@ pub struct SenderStats {
     pub late_groups: u64,
 }
 
-/// Writes one camera's frames to a session, one stream per group, with
-/// newer groups at a higher priority.
+/// Writes one track's frames to a session, one stream per group. Streams
+/// are ordered by the track's priority, then newest group first.
 pub struct GroupSender {
     session: Session,
     policy: SendPolicy,
+    track_priority: u8,
     current: Option<(u64, SendStream)>,
     next_index: u32,
     previous: VecDeque<SendStream>,
@@ -50,17 +51,20 @@ pub struct GroupSender {
     pub stats: SenderStats,
 }
 
-/// Stream priority of a group: newer is more urgent. Wraps after 2^30
-/// groups (decades at one keyframe a second).
-fn priority(group: u64) -> i32 {
-    (group & 0x3fff_ffff) as i32
+/// Stream priority of a group: the track's priority in the top bits, then
+/// newer groups first. The group part wraps after 2^22 groups; a sender
+/// keeps at most a few groups of a track open, so a wrap only briefly
+/// reorders those. Below [`crate::events::PRIORITY_URGENT`] always.
+pub fn priority(track_priority: u8, group: u64) -> i32 {
+    ((track_priority as i32) << 22) | (group & 0x3f_ffff) as i32
 }
 
 impl GroupSender {
-    pub fn new(session: Session, policy: SendPolicy) -> Self {
+    pub fn new(session: Session, policy: SendPolicy, track_priority: u8) -> Self {
         Self {
             session,
             policy,
+            track_priority,
             current: None,
             next_index: 0,
             previous: VecDeque::new(),
@@ -116,7 +120,7 @@ impl GroupSender {
             }
         }
         let stream = self.session.open_uni().await?;
-        let _ = stream.set_priority(priority(frame.group));
+        let _ = stream.set_priority(priority(self.track_priority, frame.group));
         let mut stream = stream;
         let mut buf = BytesMut::with_capacity(64);
         frame.group_header().encode(&mut buf);
@@ -132,7 +136,7 @@ impl GroupSender {
         let Some((_, stream)) = self.current.as_mut() else {
             return Ok(Outcome::Skipped);
         };
-        let mut header = BytesMut::with_capacity(tq_proto::FRAME_HEADER_LEN + 4);
+        let mut header = BytesMut::with_capacity(tq_wire::FRAME_HEADER_LEN + 4);
         frame.header.encode(frame.payload.len(), &mut header);
         let mut chunks = [header.freeze(), frame.payload.clone()];
         match tokio::time::timeout(budget, stream.write_all_chunks(&mut chunks)).await {
@@ -178,7 +182,7 @@ impl GroupReader {
         let (mut header, codec_len) = GroupHeader::decode_fixed(&fixed)?;
         let mut codec = vec![0u8; codec_len];
         stream.read_exact(&mut codec).await?;
-        header.codec = String::from_utf8(codec).map_err(|_| tq_proto::WireError::Codec)?;
+        header.codec = String::from_utf8(codec).map_err(|_| tq_wire::WireError::Codec)?;
         Ok(Self { stream, header })
     }
 
@@ -195,7 +199,7 @@ impl GroupReader {
         let mut buf = BytesMut::zeroed(len);
         self.stream.read_exact(&mut buf).await?;
         let header = FrameHeader::decode(&buf)?;
-        let payload = buf.split_off(tq_proto::FRAME_HEADER_LEN).freeze();
+        let payload = buf.split_off(tq_wire::FRAME_HEADER_LEN).freeze();
         Ok(Some((header, payload)))
     }
 

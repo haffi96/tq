@@ -34,7 +34,7 @@ use gpui_kit::{
     component::{Theme, TitleBar},
     px, size, App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions,
 };
-use tq_proto::Role;
+use tq_wire::Role;
 
 actions!(tq_app, [Quit]);
 
@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,quinn=warn".into()),
         )
         .init();
-    let build = tq_proto::build_info!("tq-app");
+    let build = tq_wire::build_info!("tq-app");
     let version: &'static str = Box::leak(build.long().into_boxed_str());
     let args = Args::from_arg_matches(&Args::command().version(version).get_matches()).unwrap_or_else(|e| e.exit());
     let file = config::File::load(args.config.as_deref())?;

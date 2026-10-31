@@ -1,7 +1,7 @@
 # tq protocol 3.0
 
 Status: draft for Phase 1 of the [roadmap](roadmap.md). It replaces 2.0
-(`crates/tq-proto`) and does not interoperate with it.
+(`crates/tq-proto`, now `crates/tq-wire`) and does not interoperate with it.
 
 3.0 keeps what already works in 2.0: one WebTransport session per hop,
 groups on their own streams with newest first, per-hop timestamps, the

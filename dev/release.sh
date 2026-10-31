@@ -33,9 +33,9 @@ version_of() {
 # What a component's release contains, for its notes.
 paths_of() {
   case "$1" in
-    publisher) echo crates/tq-publisher crates/tq-proto crates/tq-transport crates/tq-media build packaging/publisher config ;;
-    relay) echo crates/tq-relay crates/tq-proto crates/tq-transport build packaging/relay web ;;
-    app) echo crates/tq-app crates/tq-proto crates/tq-transport crates/tq-media build packaging/app ;;
+    publisher) echo crates/tq-publisher crates/tq-wire crates/tq-transport crates/tq-media build packaging/publisher config ;;
+    relay) echo crates/tq-relay crates/tq-wire crates/tq-transport build packaging/relay web ;;
+    app) echo crates/tq-app crates/tq-wire crates/tq-transport crates/tq-media build packaging/app ;;
   esac
 }
 

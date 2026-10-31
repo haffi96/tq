@@ -10,8 +10,9 @@ use tq_transport::quic::QuicOptions;
 pub struct Config {
     /// The room this robot publishes into.
     pub room_id: String,
-    #[serde(default)]
-    pub publisher_id: String,
+    /// The broadcast's name in the room. Default: the room id.
+    #[serde(default, alias = "publisher_id")]
+    pub broadcast: String,
     /// `https://host:port` of the relay's WebTransport endpoint.
     pub relay_url: String,
     /// How to trust the relay certificate; see [`Trust`].
@@ -32,7 +33,7 @@ pub struct Config {
     #[serde(default = "default_status_interval")]
     pub status_interval_ms: u64,
     #[serde(default)]
-    pub teleop: TeleopConfig,
+    pub teleop: tq_teleop::Config,
     pub cameras: Vec<CameraConfig>,
 }
 
@@ -57,24 +58,6 @@ pub enum Trust {
     SystemRoots,
     /// Skip verification. Development only.
     Insecure,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TeleopConfig {
-    /// Trip the dead-man when no operator heartbeat arrives for this long.
-    pub heartbeat_loss_ms: u64,
-    /// Once commands have started, trip when they stop for this long.
-    pub command_stale_ms: u64,
-}
-
-impl Default for TeleopConfig {
-    fn default() -> Self {
-        Self {
-            heartbeat_loss_ms: 500,
-            command_stale_ms: 500,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,8 +122,8 @@ impl Config {
         if let Ok(t) = std::env::var("TQ_TOKEN") {
             cfg.token = t;
         }
-        if cfg.publisher_id.is_empty() {
-            cfg.publisher_id = format!("{}-publisher", cfg.room_id);
+        if cfg.broadcast.is_empty() {
+            cfg.broadcast = cfg.room_id.clone();
         }
         for c in &mut cfg.cameras {
             if c.label.is_empty() {
@@ -161,6 +144,9 @@ impl Config {
         {
             problems.push("room_id must be non-empty [A-Za-z0-9_-]".to_string());
         }
+        if !tq_wire::valid_name(&self.broadcast) {
+            problems.push(format!("broadcast '{}' must be 1-64 of [A-Za-z0-9_.-]", self.broadcast));
+        }
         if url::Url::parse(&self.relay_url)
             .map(|u| u.scheme() != "https")
             .unwrap_or(true)
@@ -175,8 +161,8 @@ impl Config {
         }
         let mut ids = std::collections::HashSet::new();
         for c in &self.cameras {
-            if c.id.is_empty() || !ids.insert(&c.id) {
-                problems.push(format!("camera id '{}' is empty or duplicated", c.id));
+            if !tq_wire::valid_name(&c.id) || c.id.starts_with('.') || !ids.insert(&c.id) {
+                problems.push(format!("camera id '{}' is invalid or duplicated", c.id));
             }
             if let Err(e) = c.codec() {
                 problems.push(format!("camera {}: {e}", c.id));

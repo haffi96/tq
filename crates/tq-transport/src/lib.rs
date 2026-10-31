@@ -1,7 +1,8 @@
-//! QUIC / WebTransport plumbing shared by the publisher and the relay.
+//! QUIC / WebTransport plumbing shared by the relay and the client SDK.
 
 pub mod cert;
 pub mod control;
+pub mod dgtrack;
 pub mod events;
 pub mod group;
 pub mod quic;

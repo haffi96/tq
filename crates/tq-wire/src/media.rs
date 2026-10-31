@@ -1,27 +1,32 @@
-//! Group (GOP) streams.
+//! Group streams: one per track per group, for video (a group is a GOP)
+//! and for `latest` and `stream` data tracks.
 //!
 //! ```text
 //! group stream := group_header frame*
-//! group_header := type:u8 (=0x01) version:u8 (=1) camera:u16 group:u64
-//!                 codec_len:u8 codec:utf8[codec_len]
+//! group_header := type:u8 (=0x01) version:u8 (=2) broadcast:u16 track:u16
+//!                 group:u64 codec_len:u8 codec:utf8[codec_len]
 //! frame        := len:u32 (bytes after this field)
 //!                 index:u32 flags:u8 capture_us:u64 publisher_us:u64
 //!                 relay_us:u64 frame_id:u32 payload
 //! ```
 //!
 //! All integers are big endian. `index` is the frame's position in the
-//! group (0 = the keyframe). Times are Unix microseconds: `capture_us` on
-//! the camera machine's clock (from the encoder's LKTS SEI, or the publisher
-//! receive time when there is none), `publisher_us` when the publisher had
-//! the complete access unit, `relay_us` when the relay had it (0 on the
-//! publisher -> relay hop). The payload is one Annex B access unit; group
-//! keyframes carry their parameter sets.
+//! group (0 = the keyframe, or a data group's first message). `broadcast`
+//! is the owner's own index for the broadcast on the owner -> relay hop and
+//! the room's index on the relay -> subscriber hop; `track` is the track's
+//! position in the broadcast's advertisement. Times are Unix microseconds:
+//! `capture_us` on the capturing machine's clock (from the encoder's LKTS
+//! SEI, or the owner's receive time when there is none), `publisher_us`
+//! when the owner had the complete access unit or message, `relay_us` when
+//! the relay had it (0 on the owner -> relay hop). A video payload is one
+//! Annex B access unit (keyframes carry their parameter sets); a data
+//! payload is one message, and `codec` is its encoding.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub const STREAM_TYPE_GROUP: u8 = 0x01;
-pub const VERSION: u8 = 1;
-pub const GROUP_HEADER_FIXED: usize = 1 + 1 + 2 + 8 + 1;
+pub const VERSION: u8 = 2;
+pub const GROUP_HEADER_FIXED: usize = 1 + 1 + 2 + 2 + 8 + 1;
 pub const FRAME_HEADER_LEN: usize = 4 + 1 + 8 + 8 + 8 + 4;
 /// Largest frame accepted from the wire.
 pub const MAX_FRAME_LEN: usize = 16 << 20;
@@ -50,11 +55,12 @@ pub enum WireError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupHeader {
-    /// Index of the camera in the publisher's announce.
-    pub camera: u16,
-    /// GOP sequence number, per camera, increasing.
+    pub broadcast: u16,
+    pub track: u16,
+    /// Group sequence number, per track, increasing.
     pub group: u64,
-    /// WebCodecs codec string of the group, e.g. `avc1.42e01f`.
+    /// WebCodecs codec string of a video group, e.g. `avc1.42e01f`; the
+    /// encoding of a data group (`json`, `cbor`, `bytes`).
     pub codec: String,
 }
 
@@ -64,7 +70,8 @@ impl GroupHeader {
         let codec = &codec[..codec.len().min(255)];
         buf.put_u8(STREAM_TYPE_GROUP);
         buf.put_u8(VERSION);
-        buf.put_u16(self.camera);
+        buf.put_u16(self.broadcast);
+        buf.put_u16(self.track);
         buf.put_u64(self.group);
         buf.put_u8(codec.len() as u8);
         buf.put_slice(codec);
@@ -84,12 +91,14 @@ impl GroupHeader {
         if version != VERSION {
             return Err(WireError::Version(version));
         }
-        let camera = b.get_u16();
+        let broadcast = b.get_u16();
+        let track = b.get_u16();
         let group = b.get_u64();
         let codec_len = b.get_u8() as usize;
         Ok((
             Self {
-                camera,
+                broadcast,
+                track,
                 group,
                 codec: String::new(),
             },
@@ -157,10 +166,11 @@ impl FrameHeader {
     }
 }
 
-/// A frame as it moves through the publisher and relay.
+/// A frame as it moves through an owner and the relay.
 #[derive(Debug, Clone)]
 pub struct MediaFrame {
-    pub camera: u16,
+    pub broadcast: u16,
+    pub track: u16,
     pub group: u64,
     pub codec: std::sync::Arc<str>,
     pub header: FrameHeader,
@@ -174,7 +184,8 @@ impl MediaFrame {
 
     pub fn group_header(&self) -> GroupHeader {
         GroupHeader {
-            camera: self.camera,
+            broadcast: self.broadcast,
+            track: self.track,
             group: self.group,
             codec: self.codec.to_string(),
         }
@@ -188,7 +199,8 @@ mod tests {
     #[test]
     fn group_header_roundtrip() {
         let h = GroupHeader {
-            camera: 3,
+            broadcast: 2,
+            track: 3,
             group: 1 << 40,
             codec: "hev1.1.6.L93.B0".into(),
         };
@@ -218,7 +230,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_streams() {
-        assert_eq!(GroupHeader::decode(&[0x02; 13]).unwrap_err(), WireError::StreamType(2));
+        assert_eq!(GroupHeader::decode(&[0x02; 15]).unwrap_err(), WireError::StreamType(2));
         assert_eq!(FrameHeader::check_len(3).unwrap_err(), WireError::FrameLen(3));
     }
 }

@@ -17,7 +17,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::{ServeDir, ServeFile},
 };
-use tq_proto::{now_us, sign_token, verify_token, Claims, Role, RoomState, TokenError};
+use tq_wire::{now_us, sign_token, verify_token, Claims, Perms, RoomState, TokenError};
 use tq_transport::cert::Certificate;
 
 use crate::Relay;
@@ -104,7 +104,8 @@ struct RoomsQuery {
 }
 
 /// The rooms a token is valid for (all of them for `*`), with their
-/// participants. Needs `?token=`, like the WebTransport sessions.
+/// broadcasts and participants. Needs `?token=`, like the WebTransport
+/// sessions.
 async fn rooms(State(relay): State<Arc<Relay>>, Query(q): Query<RoomsQuery>) -> axum::response::Response {
     match rooms_for(&relay, &q.token) {
         Ok(rooms) => Json(rooms).into_response(),
@@ -127,26 +128,32 @@ pub(crate) fn rooms_for(relay: &Relay, token: &str) -> Result<Vec<RoomState>, To
 
 #[derive(Deserialize)]
 struct TokenQuery {
-    role: Role,
+    /// `operator` or `viewer`.
+    preset: String,
     room: String,
     #[serde(default)]
     sub: Option<String>,
 }
 
-/// Mints a browser token. Only with `--dev`: anyone who can reach the HTTP
-/// port can drive.
+/// Mints a console token. Only with `--dev`: anyone who can reach the HTTP
+/// port can drive. Never a token that may publish.
 async fn dev_token(State(relay): State<Arc<Relay>>, Query(q): Query<TokenQuery>) -> axum::response::Response {
     if !relay.dev {
         return (StatusCode::NOT_FOUND, "token minting is only enabled with --dev").into_response();
     }
-    if q.role == Role::Publisher {
-        return (StatusCode::FORBIDDEN, "publisher tokens are not minted over HTTP").into_response();
-    }
+    let perms = match q.preset.as_str() {
+        "operator" => Perms::operator(),
+        "viewer" => Perms::viewer(),
+        other => {
+            return (StatusCode::FORBIDDEN, format!("no '{other}' tokens over HTTP (operator or viewer)"))
+                .into_response()
+        }
+    };
     let claims = Claims {
-        sub: q.sub.unwrap_or_else(|| format!("dev-{}", q.role)),
-        role: q.role,
+        sub: q.sub.unwrap_or_else(|| format!("dev-{}", q.preset)),
         room: q.room,
         exp: now_us() / 1_000_000 + 12 * 3600,
+        perms,
     };
     Json(serde_json::json!({ "token": sign_token(relay.secret.as_bytes(), &claims) })).into_response()
 }

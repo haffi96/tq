@@ -243,9 +243,9 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
 }
 
 /// Path statistics of a connection, for the UI.
-pub fn quic_stats(conn: &quinn::Connection) -> tq_proto::QuicStats {
+pub fn quic_stats(conn: &quinn::Connection) -> tq_wire::QuicStats {
     let s = conn.stats();
-    tq_proto::QuicStats {
+    tq_wire::QuicStats {
         rtt_ms: s.path.rtt.as_secs_f64() * 1000.0,
         cwnd: s.path.cwnd,
         lost_packets: s.path.lost_packets,

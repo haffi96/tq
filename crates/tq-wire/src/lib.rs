@@ -1,36 +1,39 @@
-//! Wire format of the tq ("teleop over QUIC") protocol. The protocol
+//! Wire format of the tq ("tele over QUIC") protocol, 3.x. The protocol
 //! version ([`PROTOCOL`]) is separate from each component's version; see
-//! [`version`].
+//! [`version`]. The specification is `docs/protocol-3.md`.
 //!
-//! Every hop (publisher -> relay -> browser) is a WebTransport session in a
-//! room ([`room`]) and uses the same four channels:
+//! Every session is a WebTransport session in a room ([`room`]) at
+//! `/v1/room/{room}`, and any session may publish (advertise broadcasts),
+//! subscribe, or both, as its token's permissions ([`token`]) allow. Each
+//! session uses four kinds of channel:
 //!
 //! - **Control stream**: the first bidirectional stream, opened by the
-//!   client. Length-prefixed JSON messages ([`control`]) about the session
-//!   itself.
-//! - **Events stream**: one unidirectional stream per session ([`room`]):
-//!   the room's state and its sequenced events. It and the control stream
-//!   are sent ahead of video.
-//! - **Group streams**: one unidirectional stream per camera per GOP
-//!   ([`media`]). A group starts with a keyframe; frames follow in decode
-//!   order. Newer groups get a higher send priority, and a sender may reset
-//!   an old group's stream to drop it.
-//! - **Datagrams**: teleop commands, acks and heartbeats ([`datagram`]),
-//!   unreliable and never queued behind video.
+//!   session. Length-prefixed JSON messages ([`control`]).
+//! - **Events stream**: one unidirectional stream each way ([`room`]): the
+//!   room's state and events to the session, the edges of its own
+//!   broadcasts from it. It and the control stream are sent ahead of media.
+//! - **Group streams**: one unidirectional stream per track per group
+//!   ([`media`]), in either direction.
+//! - **Datagrams** ([`datagram`]): channel messages, lock heartbeats, acks
+//!   and echoes, and the frames of datagram tracks.
 //!
-//! The browser side mirrors this module in `web/src/protocol.ts`; keep the
+//! The browser side mirrors this crate in `web/src/protocol.ts`; keep the
 //! two in step.
 
+pub mod clock;
 pub mod control;
 pub mod datagram;
 pub mod media;
+pub mod path;
 pub mod room;
 pub mod token;
 pub mod version;
 
+pub use clock::*;
 pub use control::*;
 pub use datagram::*;
 pub use media::*;
+pub use path::*;
 pub use room::*;
 pub use token::*;
 pub use version::*;
@@ -49,7 +52,7 @@ pub mod code {
     pub const GROUP_SUPERSEDED: u32 = 1;
     /// The receiver fell too far behind; the rest of the group was dropped.
     pub const GROUP_LATE: u32 = 2;
-    /// Session closed by the relay because another publisher took over.
+    /// Another session took over this session's broadcast.
     pub const REPLACED: u32 = 3;
     /// Session closed because of a protocol violation.
     pub const PROTOCOL_ERROR: u32 = 4;
@@ -57,4 +60,6 @@ pub mod code {
     pub const SHUTDOWN: u32 = 5;
     /// The peers' protocol majors differ; the reason says which versions.
     pub const UNSUPPORTED_VERSION: u32 = 6;
+    /// The token does not allow this room.
+    pub const FORBIDDEN: u32 = 7;
 }

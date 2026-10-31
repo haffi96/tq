@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
-use tq_proto::Role;
+use tq_wire::Role;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -11,7 +11,7 @@ rust-version = "1.95"
 
 [dependencies]
 tq-media = { workspace = true }
-tq-proto = { workspace = true }
+tq-wire = { workspace = true }
 tq-transport = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }

@@ -1,8 +1,8 @@
-//! Events streams ([`tq_proto::room`]) and telling them apart from group
+//! Events streams ([`tq_wire::room`]) and telling them apart from group
 //! streams.
 
 use bytes::Bytes;
-use tq_proto::{RoomMessage, WireError, EVENTS_VERSION, GROUP_HEADER_FIXED, STREAM_TYPE_EVENTS, STREAM_TYPE_GROUP};
+use tq_wire::{RoomMessage, WireError, EVENTS_VERSION, GROUP_HEADER_FIXED, STREAM_TYPE_EVENTS, STREAM_TYPE_GROUP};
 use web_transport_quinn::{RecvStream, SendStream, Session};
 
 use crate::group::GroupReader;
@@ -21,7 +21,7 @@ impl EventsTx {
     pub async fn open(session: &Session) -> anyhow::Result<Self> {
         let mut stream = session.open_uni().await?;
         let _ = stream.set_priority(PRIORITY_URGENT);
-        stream.write_all(&tq_proto::events_stream_header()).await?;
+        stream.write_all(&tq_wire::events_stream_header()).await?;
         Ok(Self { stream })
     }
 

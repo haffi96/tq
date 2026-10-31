@@ -7124,6 +7124,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
+name = "tq"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tq-transport",
+ "tq-wire",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "tq-app"
 version = "0.4.0"
 dependencies = [
@@ -7146,8 +7161,8 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tq-media",
- "tq-proto",
  "tq-transport",
+ "tq-wire",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -7162,21 +7177,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tq-proto"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "hmac",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "tq-publisher"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7184,9 +7186,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tq",
  "tq-media",
- "tq-proto",
+ "tq-teleop",
  "tq-transport",
+ "tq-wire",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -7209,11 +7213,24 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-http",
- "tq-proto",
+ "tq",
  "tq-transport",
+ "tq-wire",
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "tq-teleop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tq",
+ "tracing",
 ]
 
 [[package]]
@@ -7226,8 +7243,9 @@ dependencies = [
  "rand 0.9.5",
  "serde_json",
  "tokio",
- "tq-proto",
+ "tq",
  "tq-transport",
+ "tq-wire",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -7248,9 +7266,22 @@ dependencies = [
  "sha2 0.10.9",
  "time",
  "tokio",
- "tq-proto",
+ "tq-wire",
  "tracing",
  "web-transport-quinn",
+]
+
+[[package]]
+name = "tq-wire"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

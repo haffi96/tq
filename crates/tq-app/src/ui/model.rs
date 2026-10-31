@@ -9,7 +9,7 @@ use std::{
 };
 
 use gpui_kit::Context;
-use tq_proto::{
+use tq_wire::{
     BuildInfo, Compat, Control, Event as RoomEvent, OperatorChange, PublisherGone, Role, RoomMessage, RoomState,
 };
 
@@ -120,7 +120,7 @@ impl Model {
         if Compat::of_build(build.as_ref()) != Compat::Same {
             self.push_log(format!(
                 "Warning: {}",
-                tq_proto::mismatch("publisher", build.as_ref(), "tq-app")
+                tq_wire::mismatch("publisher", build.as_ref(), "tq-app")
             ));
         }
     }
@@ -270,7 +270,7 @@ impl Model {
                     if Compat::of_build(relay.as_ref()) != Compat::Same {
                         self.push_log(format!(
                             "Warning: {}",
-                            tq_proto::mismatch("relay", relay.as_ref(), "tq-app")
+                            tq_wire::mismatch("relay", relay.as_ref(), "tq-app")
                         ));
                     }
                     self.relay_build = relay;
@@ -397,6 +397,6 @@ fn push<T>(h: &mut VecDeque<T>, v: T) {
 }
 
 fn time_of_day() -> String {
-    let secs = tq_proto::now_us() / 1_000_000;
+    let secs = tq_wire::now_us() / 1_000_000;
     format!("{:02}:{:02}:{:02}Z", secs / 3600 % 24, secs / 60 % 60, secs % 60)
 }

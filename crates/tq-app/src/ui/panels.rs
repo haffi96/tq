@@ -16,7 +16,7 @@ use gpui_kit::{
     prelude::*,
     px, AnyElement, App, Context, Entity, SharedString, Window,
 };
-use tq_proto::{BuildInfo, Compat, Control, Role};
+use tq_wire::{BuildInfo, Compat, Control, Role};
 
 use super::{
     model::{Model, UpdateState},

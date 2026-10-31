@@ -1,6 +1,6 @@
 [package]
-name = "tq-proto"
-description = "Wire format shared by the tq publisher, relay and (mirrored in TypeScript) the browser player"
+name = "tq-wire"
+description = "Wire format of the tq protocol (3.x): control, events, group streams, datagrams, tokens"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

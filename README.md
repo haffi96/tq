@@ -26,7 +26,7 @@ instead of WebRTC.
 | Path | What it is |
 | --- | --- |
 | `crates/tq-media` | Elementary stream handling: NAL framing (Annex B or 4-byte length-prefixed, auto-detected), access unit assembly, SEI capture timestamps, codec strings, parameter set repetition. No decoding. |
-| `crates/tq-proto` | Wire format: GOP stream and frame headers, JSON control messages, teleop datagrams, HS256 tokens. `web/src/protocol.ts` mirrors it. |
+| `crates/tq-wire` | Wire format: GOP stream and frame headers, JSON control messages, teleop datagrams, HS256 tokens. `web/src/protocol.ts` mirrors it. |
 | `crates/tq-transport` | quinn / web-transport-quinn endpoints (BBR, bounded send window), certificates, the per-camera GOP cache (`Track`), the GOP stream sender with its drop policy, and the reader. |
 | `crates/tq-publisher` | Robot-side binary: reads the TCP sources, uplinks to the relay, runs the teleop sink and dead-man. |
 | `crates/tq-relay` | Relay binary: WebTransport for the publisher and browsers, HTTP for the app, `/api/cert` and dev tokens. |
@@ -218,7 +218,7 @@ carries what concerns the session itself.
 - Both sides use `ping`/`pong` to measure RTT and NTP-style clock offset.
 
 **2. Events stream.** One unidirectional stream per session carries the
-room ([`crates/tq-proto/src/room.rs`](crates/tq-proto/src/room.rs)):
+room ([`crates/tq-wire/src/room.rs`](crates/tq-wire/src/room.rs)):
 
 ```text
 type=0x02 ver=1, then per message: len:u32 JSON

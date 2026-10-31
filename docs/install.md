@@ -9,13 +9,13 @@ Each part of tq is versioned and released on its own:
 | Web app | `web/package.json` | none | Nothing on its own. It ships inside the relay image. |
 | Native app | `crates/tq-app/Cargo.toml` | `app-vX.Y.Z` | macOS: `.dmg` to install, `.zip` for the in-app updater. Linux: `.tar.gz` for both. `SHA256SUMS` over all of them. |
 
-The libraries (`tq-proto`, `tq-transport`, `tq-media`) are not released.
+The libraries (`tq-wire`, `tq-transport`, `tq-media`) are not released.
 Each binary includes whatever version of them it was built with.
 
 ## What has to match: the protocol
 
 Each component has its own version. Components only need to agree on the
-**protocol version** (`PROTOCOL` in `crates/tq-proto/src/version.rs`,
+**protocol version** (`PROTOCOL` in `crates/tq-wire/src/version.rs`,
 mirrored in `web/src/protocol.ts`):
 
 - **Minor** (1.1 → 1.2): adds fields or messages that older peers ignore.

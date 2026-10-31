@@ -8,7 +8,7 @@ publish.workspace = true
 build = "../../build/version.rs"
 
 [dependencies]
-tq-proto = { workspace = true }
+tq-wire = { workspace = true }
 tq-transport = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
@@ -26,3 +26,6 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+tq = { workspace = true }

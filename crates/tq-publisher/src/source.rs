@@ -1,41 +1,27 @@
-//! TCP camera source: encoder byte stream -> frames on the camera's track.
+//! TCP camera source: encoder byte stream -> frames on the camera's video
+//! track. Anything that writes H.264/H.265 (Annex B or length-prefixed) to
+//! a TCP socket is a camera.
 
 use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        Arc, Mutex,
-    },
+    sync::{atomic::AtomicU64, atomic::Ordering::Relaxed, Arc, Mutex},
     time::Duration,
 };
 
 use tokio::{io::AsyncReadExt, net::TcpStream};
+use tq::Publication;
 use tq_media::{AuAssembler, NalFramer, Packager};
-use tq_proto::{now_us, FrameHeader, MediaFrame, FLAG_CAPTURE_FROM_SEI, FLAG_KEY};
 use tq_transport::track::Track;
+use tq_wire::{now_us, FrameHeader, MediaFrame, FLAG_CAPTURE_FROM_SEI, FLAG_KEY};
 
-use crate::{config::CameraConfig, edges::Edges};
-
-/// Counters shared with the status reporter.
-#[derive(Default)]
-pub struct CameraStats {
-    pub online: AtomicBool,
-    pub frames: AtomicU64,
-    pub groups: AtomicU64,
-    pub bytes: AtomicU64,
-    /// Dropped on the uplink (late / superseded), updated by the sender.
-    pub dropped: AtomicU64,
-    pub capture_lat_sum_us: AtomicU64,
-    pub capture_lat_n: AtomicU64,
-    pub codec_string: Mutex<Option<String>>,
-    pub detected_codec: Mutex<Option<String>>,
-}
+use crate::config::CameraConfig;
 
 pub struct Camera {
-    pub index: u16,
     pub config: CameraConfig,
+    /// The camera's video track in the publication.
     pub track: Arc<Track>,
-    pub stats: Arc<CameraStats>,
-    pub edges: Arc<Edges>,
+    pub publication: Arc<Publication>,
+    pub frames: AtomicU64,
+    pub detected_codec: Mutex<Option<String>>,
 }
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -60,12 +46,7 @@ pub async fn run(camera: Arc<Camera>) {
                     tracing::warn!(camera = %cfg.id, "source closed");
                     "source closed".to_string()
                 };
-                if camera.stats.online.swap(false, Relaxed) {
-                    camera.edges.emit(tq_proto::Event::TrackOffline {
-                        camera: cfg.id.clone(),
-                        reason,
-                    });
-                }
+                camera.publication.set_online(&cfg.id, false, &reason);
                 camera.track.reset();
             }
             Err(e) => {
@@ -85,6 +66,7 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
     let mut pipeline: Option<(AuAssembler, Packager)> = None;
     let mut index: u32 = 0;
     let mut started = false;
+    let mut codec_string: Option<String> = None;
     let mut buf = vec![0u8; 256 << 10];
     let mut nals = Vec::new();
     let mut aus = Vec::new();
@@ -104,7 +86,7 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
             None => {
                 let codec = framer.codec().expect("codec known once a NAL is out");
                 tracing::info!(camera = %cfg.id, %codec, framing = ?framer.framing().unwrap(), "stream detected");
-                *camera.stats.detected_codec.lock().unwrap() = Some(codec.to_string());
+                *camera.detected_codec.lock().unwrap() = Some(codec.to_string());
                 pipeline.insert((AuAssembler::new(codec, cfg.complete_on_vcl), Packager::new(codec)))
             }
         };
@@ -118,38 +100,28 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
             if frame.key {
                 *group += 1;
                 index = 0;
-                camera.stats.groups.fetch_add(1, Relaxed);
-                let mut cs = camera.stats.codec_string.lock().unwrap();
-                if cs.as_deref() != Some(&frame.codec_string) {
+                if codec_string.as_deref() != Some(&frame.codec_string) {
                     tracing::info!(camera = %cfg.id, codec = %frame.codec_string, "codec string");
-                    *cs = Some(frame.codec_string.clone());
+                    codec_string = Some(frame.codec_string.clone());
                 }
             }
             if !started {
                 started = true;
-                if !camera.stats.online.swap(true, Relaxed) {
-                    camera
-                        .edges
-                        .emit(tq_proto::Event::TrackOnline { camera: cfg.id.clone() });
-                }
+                camera.publication.set_online(&cfg.id, true, "");
             }
             let mut flags = if frame.key { FLAG_KEY } else { 0 };
             let capture_us = match frame.capture_us {
                 Some(ts) => {
                     flags |= FLAG_CAPTURE_FROM_SEI;
-                    camera
-                        .stats
-                        .capture_lat_sum_us
-                        .fetch_add(publisher_us.saturating_sub(ts), Relaxed);
-                    camera.stats.capture_lat_n.fetch_add(1, Relaxed);
                     ts
                 }
                 None => publisher_us,
             };
-            camera.stats.frames.fetch_add(1, Relaxed);
-            camera.stats.bytes.fetch_add(frame.data.len() as u64, Relaxed);
+            camera.frames.fetch_add(1, Relaxed);
             let media = MediaFrame {
-                camera: camera.index,
+                // The session stamps its own indices.
+                broadcast: 0,
+                track: 0,
                 group: *group,
                 codec: frame.codec_string.as_str().into(),
                 header: FrameHeader {
@@ -163,7 +135,7 @@ async fn read_stream(camera: &Camera, mut stream: TcpStream, group: &mut u64) ->
                 payload: frame.data,
             };
             index += 1;
-            camera.track.push(media, camera.index);
+            camera.track.push(media);
         }
     }
 }

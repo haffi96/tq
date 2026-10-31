@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The protocol this build speaks.
-pub const PROTOCOL: ProtocolVersion = ProtocolVersion { major: 2, minor: 0 };
+pub const PROTOCOL: ProtocolVersion = ProtocolVersion { major: 3, minor: 0 };
 
 /// What a peer without build info speaks: everything before 1.1.
 pub const PROTOCOL_LEGACY: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
@@ -33,7 +33,7 @@ impl std::fmt::Display for ProtocolVersion {
 /// Who a peer is: sent in the first message of each session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildInfo {
-    /// `tq-relay`, `tq-publisher`, `tq-app`, `tq-web` or `tq-probe`.
+    /// `tq-relay`, `tq-publisher`, `tq-app`, `tq-web`, `tq-probe`, ….
     pub component: String,
     /// The component's own semver.
     pub version: String,
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn macro_uses_caller_version() {
-        let b = crate::build_info!("tq-proto-test");
+        let b = crate::build_info!("tq-wire-test");
         assert_eq!(b.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(b.protocol, PROTOCOL);
         assert_eq!(b.long(), format!("{} protocol {PROTOCOL}", b.short()));

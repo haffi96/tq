@@ -15,7 +15,7 @@ use std::{
 use anyhow::Context;
 use futures::channel::mpsc::UnboundedSender;
 use tokio::sync::mpsc;
-use tq_proto::{
+use tq_wire::{
     clock_offset, now_us, BuildInfo, CameraInfo, ClockFilter, Compat, Control, Datagram, Role, RoomMessage,
 };
 use tq_transport::{
@@ -271,13 +271,13 @@ async fn connect(shared: &Shared) -> anyhow::Result<Session> {
         .await
         .context("relay /api/info")?;
     if Compat::of_build(info.build.as_ref()) == Compat::Incompatible {
-        return Err(VersionRefused(tq_proto::mismatch("relay", info.build.as_ref(), "tq-app")).into());
+        return Err(VersionRefused(tq_wire::mismatch("relay", info.build.as_ref(), "tq-app")).into());
     }
     let token = match (&c.token, &c.secret) {
         (Some(t), _) => t.clone(),
-        (None, Some(secret)) => tq_proto::sign_token(
+        (None, Some(secret)) => tq_wire::sign_token(
             secret.as_bytes(),
-            &tq_proto::Claims {
+            &tq_wire::Claims {
                 sub: format!("app-{}", c.role),
                 role: c.role,
                 room: c.room.clone(),

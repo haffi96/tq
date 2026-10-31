@@ -1,5 +1,5 @@
 //! Build script shared by the binary crates (`build = "../../build/version.rs"`).
-//! Sets `TQ_GIT_SHA` for `tq_proto::build_info!`: the short commit, with
+//! Sets `TQ_GIT_SHA` for `tq_wire::build_info!`: the short commit, with
 //! `-dirty` when the tree had uncommitted changes. A `TQ_GIT_SHA` in the
 //! environment wins (container builds have no `.git`).
 //!

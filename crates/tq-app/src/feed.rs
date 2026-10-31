@@ -11,7 +11,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use tq_proto::{now_us, CameraInfo, FrameHeader, FLAG_CAPTURE_FROM_SEI};
+use tq_wire::{now_us, CameraInfo, FrameHeader, FLAG_CAPTURE_FROM_SEI};
 
 use crate::{
     session::Shared,

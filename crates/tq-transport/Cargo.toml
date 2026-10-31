@@ -6,7 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-tq-proto = { workspace = true }
+tq-wire = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
