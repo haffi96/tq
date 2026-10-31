@@ -39,32 +39,41 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 Every phase ends with teleop working end to end (`dev/run-local.sh`, both
 apps, tq-probe). Teleop is the regression test.
 
-### Phase 1: generic core (protocol 3.0)
+### Phase 1: generic core (protocol 3.0) — done
 
 - `tq-proto` → `tq-wire`, implementing [protocol-3.md](protocol-3.md):
   one endpoint for all sessions, broadcasts, tracks with kinds and
-  priorities, explicit subscriptions, channels, locks and path permissions.
-- Relay: rewrites indices between owner and room, routes channel datagrams
-  by sender session, enforces locks and permissions, knows nothing about
-  teleop. Many broadcasts per room if that comes cheap, otherwise a cap of
-  one to lift in a minor (no wire change).
-- Robot side: generic channel handling; teleop moves into a `tq-teleop`
-  crate (drive command schema, sink trait, watchdog).
-- Data tracks: any session can publish JSON telemetry, with the same
-  latency trace as video. Device state and events become `.status` and
-  `.events` tracks.
-- Clocks: one `Clock` type in the SDK composes the per-hop offsets and keeps
-  error bounds. Every app shows glass-to-glass latency on the receiver's
-  clock, SEI or not.
-- Web, tq-app and tq-probe move to 3.0.
-- Accept: the grep above is empty, teleop works, all tests pass.
+  priorities, explicit subscriptions (with `max_rate_hz` and a drop
+  policy), channels, locks, path permissions, datagram tracks.
+- Relay: rewrites broadcast indices between owner and room, routes channel
+  datagrams by sender session, enforces locks and permissions, measures
+  track stats itself, knows nothing about teleop. Many broadcasts per room.
+- `tq-teleop`: drive and e-stop channels, the dead-man as a lock watchdog,
+  robot status on `.status`.
+- Data tracks: any session can publish them, with the same latency trace as
+  video. Device state and events are `.status` and `.events` tracks.
+- Clocks: `tq_wire::Offset` composes the per-hop offsets with their error
+  bounds; `Session::owner_offset` gives any owner's clock.
+- Web, tq-app, tq-probe and tq-publisher speak 3.0.
+- Checked: the grep above is empty; relay end-to-end tests cover
+  publishing, subscribing, permissions, thinning, channels, locks, the
+  watchdog, outages and takeover; teleop works end to end with the real
+  encoders through tq-probe. The consoles are only build-checked so far.
 
-### Phase 2: SDK extraction
+### Phase 2: SDK extraction — Rust half done
 
-- A `tq` crate with one `Session` type: advertise broadcasts, subscribe to
-  tracks, open channels, read clocks and latency. `tq-app/session.rs`,
-  `tq-publisher/uplink.rs` and `tq-probe` repeat each other today; they
-  become users of `tq`.
+Done, pulled into Phase 1 so each client was ported once:
+- A `tq` crate: `Session` (subscribe, channels, locks, clocks) and
+  `Publication` (a broadcast that outlives reconnects: tracks, an inbox for
+  channel messages with latest-wins sequencing, lock holders, watchdogs).
+  tq-publisher, tq-probe and tq-app use it.
+
+Still to do:
+- SDK gaps found porting tq-app: a reconnecting session whose
+  subscriptions survive reconnects; a lock-holding guard that heartbeats
+  (`session.hold(lock, interval)`); a helper that puts a frame's timestamps
+  on the local clock; relay discovery over HTTPS (`/api/info`, dev tokens)
+  so apps do not carry their own HTTP client.
 - `tq-publisher` → `tq-edge`: a config-driven agent on the device (sources to
   tracks, channels to sinks).
 - Goal: publishing a camera and a channel is about 10 lines of Rust.
@@ -144,9 +153,8 @@ path. Both apps render it.
 
 ### Phase 5: positioning
 
-- README and docs describe tq as tele over QUIC, with teleop as the first
-  example. This waits until Phase 1 lands, so the README never describes
-  something that does not exist yet.
+- Done: README and docs describe tq as tele over QUIC, with teleop as the
+  first example.
 - `examples/`: teleop, multi-camera monitoring, PTZ inspection, a fleet
   dashboard.
 - Repo and package names follow if anything changes.

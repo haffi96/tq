@@ -86,10 +86,10 @@ same secret:
 
 ```sh
 export TQ_SHARED_SECRET=$(terraform output -raw shared_secret)
-cargo run -p tq-relay -- token --role operator --room robot-01 --ttl-hours 12
+cargo run -p tq-relay -- token --preset operator --room robot-01 --ttl-hours 12
 ```
 
-Then open `https://tq.haffi.dev/?room=robot-01&role=operator&token=…`.
+Then open `https://tq.haffi.dev/?room=robot-01&preset=operator&token=…`.
 
 Publisher config:
 

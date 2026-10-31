@@ -27,17 +27,15 @@ mirrored in `web/src/protocol.ts`):
   `/api/info` first and do not connect to an incompatible relay.
 
 Every session starts with each side's build: version, commit and protocol.
-- The publisher sends its build in `announce`.
-- Clients send theirs in `hello`.
-- The relay sends its build in `welcome` and `announce_ok`, and serves it at
-  `/api/info`.
+- Every session sends its build in `hello`.
+- The relay sends its build in `welcome`, and serves it at `/api/info`.
 
-Peers from before protocol 1.1 send no build. They count as protocol 1.0.
-
-Protocol 2.0 introduced rooms and the events stream (and renamed `av` to
-`room` in URLs, tokens and the publisher's `room_id`), so 1.x peers and
-2.0 peers refuse each other: upgrade the relay, publishers and apps
-together.
+Protocol 3.0 ([protocol-3.md](protocol-3.md)) replaced roles with
+permissions and cameras with broadcasts of tracks, channels and locks, and
+moved every session to one endpoint, `/v1/room/{room}`. 2.x and 3.x peers
+refuse each other: upgrade the relay, publishers and apps together. The
+publisher config's `publisher_id` is now `broadcast` (the old key still
+works) and defaults to the room id.
 
 **Rollout order:** relay first, then publishers and apps. The relay accepts
 any minor of its own major, so publishers and apps can follow at their own
@@ -283,7 +281,7 @@ flags. It reads its settings from a file instead; flags still override it:
 {
   "relay_http": "https://tq-relay-1.haffi.dev",
   "room": "robot-01",
-  "role": "operator",
+  "preset": "operator",
   "secret": "…"
 }
 ```
@@ -292,7 +290,7 @@ flags. It reads its settings from a file instead; flags still override it:
 | --- | --- |
 | `relay_http` | Relay HTTP base. Default `http://127.0.0.1:8080`. Use `https://` for a relay with a real certificate (checked against the system CA roots), and `http://` for a self-signed or dev relay. |
 | `relay` | QUIC `host:port`. Default: the HTTP host and the relay's QUIC port. |
-| `room`, `role` | Default `robot-01`, `viewer`. |
+| `room`, `preset` | Default `robot-01`, `viewer` (`operator` to drive). `role` is still accepted. |
 | `token` or `secret` | A session token, or the shared secret to sign one. Without either, the app asks a `--dev` relay for a token. |
 | `update.repo`, `update.prerelease` | Where updates come from (default `haffi96/tq`), and whether to offer pre-releases. |
 | `update.token` | Optional GitHub token (see [Tokens](#tokens)). |
@@ -314,7 +312,7 @@ Installing an update:
 4. Restarts with the same arguments.
 
 Nothing is replaced if any check fails. Two limits:
-- Updating is disabled while you hold the operator claim. The restart drops
+- Updating is disabled while you hold a robot's drive lock. The restart drops
   the session, which would trip the robot's dead-man switch mid-drive.
 - The app has to be somewhere you can write to, such as `/Applications` for
   an admin user on macOS, or `~/.local/bin` on Linux. A build run from

@@ -1,38 +1,54 @@
 <p align="center"><img src="assets/brand/icon.png" alt="tq" width="128" /></p>
 
-# tq: teleop over QUIC
+# tq: tele over QUIC
 
-Low-latency robot teleoperation, video and control, over WebTransport (QUIC)
-instead of WebRTC.
+Low-latency video, telemetry and control between machines and people, over
+QUIC / WebTransport instead of WebRTC, with latency measured on every frame
+from capture to glass. Built for robots; teleoperation is the first
+complete example.
 
-- Pre-encoded H.264/H.265 camera streams arrive over TCP and are never
-  decoded or re-encoded on the way. (Locally the encoder is `gstreamer-source`
-  from [streaming-tools](https://github.com/haffi96/streaming-tools).)
-- One relay serves the robot, the operator and any number of viewers.
-- The browser decodes with WebCodecs and draws every frame as soon as it is
-  decoded. There is no jitter buffer.
-- Teleop runs over QUIC datagrams, with a dead-man switch on the robot side.
+- **Broadcasts, not calls.** Any session publishes a *broadcast* (video and
+  data tracks, plus *channels* others send into and *locks* that make some
+  of them exclusive) and subscribes to anyone else's. What it may do comes
+  from its token's permissions, down to a single track.
+- **Video untouched.** Pre-encoded H.264/H.265 arrives over TCP and is never
+  decoded or re-encoded on the way. One QUIC stream per GOP; stale GOPs are
+  dropped whole.
+- **Data as fast as it comes.** Data tracks are `latest` (newest value wins),
+  `stream` (every message, in order) or `datagram` (one QUIC datagram per
+  message, for IMU-rate data), and subscribers can ask the relay to thin
+  them to the rate they can show.
+- **Latency you can see.** Every frame and message carries capture, owner
+  and relay timestamps; per-hop clock offsets put them all on the viewer's
+  clock, with error bounds.
+- **Teleop from general parts.** A `drive` channel behind a `drive` lock;
+  the lock's watchdog is the dead-man switch.
 
 ```text
- Robot (Starlink)                            Cloud relay                         Browsers
- encoder --TCP--> tq-publisher ==QUIC/WT==> tq-relay ==WebTransport==> operator (drops aggressively)
- H.264/H.265      AU assembly,   GOP streams  GOP cache, fan-out,        \=> viewers (looser policy)
- Annex B / AVC    teleop sink    datagrams    claim/lease, auth, HTTP
-                  + dead-man   <==teleop====  forwards holder's datagrams
+ Robot                                   Cloud relay                        Consoles
+ encoder --TCP--> tq-publisher ==WT==>  tq-relay  ==WebTransport==>  web page / tq-app
+ H.264/H.265      broadcast "rover":    caches, fans out per            subscribe to tracks,
+                  video, .status,       subscription, checks            claim the drive lock,
+                  drive lock + chan.  <== permissions and locks <==      send drive commands
 ```
+
+The wire protocol (3.0) is specified in [docs/protocol-3.md](docs/protocol-3.md);
+where this is going is in [docs/roadmap.md](docs/roadmap.md).
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
+| `crates/tq` | The client SDK. `Session` (connect, subscribe, send on channels, claim locks, clock offsets) and `Publication` (a broadcast that outlives reconnects: tracks, an inbox for channel messages, lock holders, watchdogs). |
+| `crates/tq-wire` | Wire format 3.0: control and room messages, group stream and frame headers, datagrams, paths, permission tokens, clock offsets. `web/src/protocol.ts` mirrors it. |
+| `crates/tq-transport` | quinn / web-transport-quinn endpoints (BBR, bounded send window), certificates, the per-track group cache (`Track`) and datagram cache, the group sender with its drop policy, and the reader. |
 | `crates/tq-media` | Elementary stream handling: NAL framing (Annex B or 4-byte length-prefixed, auto-detected), access unit assembly, SEI capture timestamps, codec strings, parameter set repetition. No decoding. |
-| `crates/tq-wire` | Wire format: GOP stream and frame headers, JSON control messages, teleop datagrams, HS256 tokens. `web/src/protocol.ts` mirrors it. |
-| `crates/tq-transport` | quinn / web-transport-quinn endpoints (BBR, bounded send window), certificates, the per-camera GOP cache (`Track`), the GOP stream sender with its drop policy, and the reader. |
-| `crates/tq-publisher` | Robot-side binary: reads the TCP sources, uplinks to the relay, runs the teleop sink and dead-man. |
-| `crates/tq-relay` | Relay binary: WebTransport for the publisher and browsers, HTTP for the app, `/api/cert` and dev tokens. |
-| `crates/tq-tools` | `tq-impair` (Starlink-like UDP impairment proxy) and `tq-probe` (headless operator/viewer that reports per-hop latency). |
-| `crates/tq-app` | Native operator/viewer app (GPUI; VideoToolbox on macOS, NVDEC on Linux), replacing `web/`. Not built by a plain `cargo build`. |
-| `web/` | Browser app in TypeScript, built with bun. `worker.ts` owns WebTransport, WebCodecs and OffscreenCanvas; `main.ts` is the UI. |
+| `crates/tq-relay` | Relay binary: one WebTransport endpoint for every session, HTTP for the web app, `/api/cert`, `/api/rooms` and dev tokens. Nothing teleop-specific. |
+| `crates/tq-teleop` | Teleop on the SDK: drive and e-stop channels, the dead-man as a lock watchdog, robot status. |
+| `crates/tq-publisher` | Robot-side binary: reads the TCP camera sources and publishes them, with teleop, as one broadcast. |
+| `crates/tq-tools` | `tq-impair` (Starlink-like UDP impairment proxy) and `tq-probe` (headless console: subscribes to every track and reports per-hop latency; can drive). |
+| `crates/tq-app` | Native console (GPUI; VideoToolbox on macOS, NVDEC on Linux). Not built by a plain `cargo build`. |
+| `web/` | Browser console in TypeScript, built with bun. `worker.ts` owns WebTransport, WebCodecs and OffscreenCanvas; `main.ts` is the UI. |
 | `config/` | Publisher configs: `publisher.example.json` (H.264 + H.265 test sources), `publisher.prodlike.json` (one H.265 camera, 10 fps, 2 Mbps, length-prefixed, like a typical robot camera). |
 | `dev/run-local.sh` | Starts the whole stack on one machine. |
 | `dev/release.sh` | Bumps a component's version; CI uses it to check tags and write release notes. |
@@ -40,7 +56,39 @@ instead of WebRTC.
 | `packaging/` | Publisher tarball/`.deb`/`install.sh` and service files, the relay's Dockerfile, the app's `.dmg` bundler. |
 | `infra/gcp/` | Terraform for the relay on GCP (London VM, Let's Encrypt, Cloudflare DNS). The web app deploys to Cloudflare from `web/` with wrangler. |
 | `assets/brand/` | The logo (`source.svg`) and `make.py`, which draws the favicon, app icons, GitHub avatar and social preview from it. |
-| `docs/install.md` | Installing, upgrading and releasing each component; versions and protocol compatibility. |
+| `docs/` | [protocol-3.md](docs/protocol-3.md), [roadmap.md](docs/roadmap.md), [install.md](docs/install.md). |
+
+## Using the SDK
+
+A program that publishes telemetry and takes commands:
+
+```rust
+use tq::wire::{Advertisement, ChannelInfo, DataInfo, Delivery, TrackInfo};
+
+let (rover, mut inbox) = tq::Publication::new(Advertisement {
+    broadcast: "rover-7".into(),
+    tracks: vec![TrackInfo::data("pose", DataInfo {
+        encoding: "json".into(), delivery: Delivery::Latest, rate_hz: Some(50.0), window_ms: None,
+    })],
+    channels: vec![ChannelInfo {
+        id: "goto".into(), label: "Go to".into(), lock: None, encoding: "json".into(), schema: None,
+    }],
+    ..Default::default()
+})?;
+let session = tq::Session::connect(options).await?;   // relay URL, room, token, trust
+session.publish(&rover).await?;
+rover.set_online("pose", true, "");
+rover.data("pose").unwrap().send_json(&serde_json::json!({ "x": 1.0, "y": 2.0 }));
+while let Some(msg) = inbox.recv().await {
+    println!("{} from session {}: {:?}", msg.channel, msg.from_sid, msg.payload);
+    msg.accept();   // the sender sees the ack and its round trip
+}
+```
+
+And one that watches it: `session.subscribe("rover-7/pose".parse()?)` returns a
+reader of frames with their timestamps; `session.owner_offset("rover-7")`
+puts them on the local clock. `tq-probe` and `crates/tq-relay/src/tests.rs`
+are complete examples.
 
 ## Versions and releases
 
@@ -49,8 +97,8 @@ separately, each from its own tag (`publisher-v*`, `relay-v*`, `app-v*`).
 They only need to agree on the protocol's major version. Every session
 exchanges each side's version, commit and protocol. A different minor shows
 a warning; a different major is refused. tq-app's status bar and the web
-page's header show which app, relay and publisher versions are in use. See
-[docs/install.md](docs/install.md).
+page's header show which app, relay and broadcast owner versions are in
+use. See [docs/install.md](docs/install.md).
 
 ## Running locally
 
@@ -68,13 +116,13 @@ IMPAIR=starlink-bad dev/run-local.sh
 ```
 
 Then open:
-- operator: http://localhost:8080/?room=robot-01&role=operator
-- viewer: http://localhost:8080/?room=robot-01&role=viewer
+- operator: http://localhost:8080/?room=robot-01&preset=operator
+- viewer: http://localhost:8080/?room=robot-01&preset=viewer
 
 Operator controls:
-- **Claim**, then hold `W`/`A`/`S`/`D` to drive (commands at 20 Hz).
+- **Claim** the robot's `drive` lock, then hold `W`/`A`/`S`/`D` to drive (commands at 20 Hz).
 - **stream 20 Hz** keeps commands flowing without a key held.
-- `Space` releases the claim, so the robot trips immediately.
+- `Space` releases the lock, so the robot trips immediately. **E-stop** sends on the robot's `estop` channel.
 
 ### Native app (macOS, Linux)
 
@@ -99,8 +147,8 @@ gpui-kit pins a `gpui-pre` snapshot that needs Rust 1.95 or newer:
 
 ```bash
 rustup update stable                  # or: rustup toolchain install 1.95, then cargo +1.95 …
-cargo run --release -p tq-app -- --role operator      # or --role viewer
-cargo run --release -p tq-app -- --role viewer --log-stats   # also log per-camera numbers
+cargo run --release -p tq-app -- --preset operator      # or --preset viewer
+cargo run --release -p tq-app -- --preset viewer --log-stats   # also log per-track numbers
 ```
 
 The window is a dock console:
@@ -144,8 +192,9 @@ under **System Settings → Privacy & Security**, or run:
 xattr -dr com.apple.quarantine /Applications/tq-app.app
 ```
 
-The operator controls match the web page: Claim / Force claim / Release,
-hold `W`/`A`/`S`/`D`, and `Space` for e-stop.
+The operator controls match the web page: Claim / Force claim / Release of
+the drive lock, hold `W`/`A`/`S`/`D`, and `Space` to release (the robot
+trips).
 
 `tq-app` is a workspace member but not a default member, because GPUI is a
 large build. Use `-p tq-app`.
@@ -171,12 +220,13 @@ cargo build --release
 (cd web && bun install && bun run build)
 ./target/release/tq-relay --dev --web-dir web/dist                      # QUIC :4443, HTTP :8080
 ./target/release/tq-publisher --config config/publisher.example.json
-./target/release/tq-probe --role operator --teleop-hz 20 --duration 20   # headless check
+./target/release/tq-probe --preset operator --teleop-hz 20 --duration 20   # headless check
 ```
 
-Tokens: `tq-relay token --role operator --room robot-01` prints a token. Pass
-it to the page as `?token=`. Without `--dev`, the relay does not mint tokens
-over HTTP.
+Tokens: `tq-relay token --preset operator --room robot-01` prints a token;
+`--perm sub:robot-01/front` (repeatable) narrows or adds permissions. Pass it
+to the page as `?token=`. Without `--dev`, the relay does not mint tokens
+over HTTP, and it never mints tokens that may publish.
 
 ### Certificates
 
@@ -201,72 +251,32 @@ The publisher completes an access unit as soon as it knows the AU is over:
 - Encoders that emit one slice per frame and no AUD terminator
   can set `"complete_on_vcl": true` on the camera to get the same effect.
 
-## Protocol (v2)
+## Protocol (3.0)
 
-Each robot has a **room** on the relay, named by its id
-(`/v1/publish/{room}`, `/v1/session/{room}`, `?room=` on the web page).
-The robot's publisher, its operators and its viewers all join it. Every
-hop is a WebTransport session with four kinds of channel.
+The full specification is [docs/protocol-3.md](docs/protocol-3.md). In short:
+every session joins a **room** at `/v1/room/{room}` and uses four kinds of
+channel.
 
-**1. Control stream.** This is the first bidirectional stream, opened by the
-client. Each message is `len:u32` followed by JSON with a `type` field. It
-carries what concerns the session itself.
-- Publisher: `announce` and `publisher_status`.
-- Operator and viewer: `hello` (must come first), `claim`, `release`,
-  `keyframe_request`.
-- Relay: `welcome`, `claim_result`, `link_stats`, `operator`.
-- Both sides use `ping`/`pong` to measure RTT and NTP-style clock offset.
+1. **Control stream** (the first bidirectional stream, length-prefixed
+   JSON): `hello`/`welcome`, `advertise`, `subscribe`/`unsubscribe`,
+   `claim`/`release`, `keyframe_request`, and `ping`/`pong` for round trips
+   and NTP-style clock offsets.
+2. **Events stream** (one unidirectional stream each way): the room's
+   `state`, then every event in order (`participant_*`, `broadcast_*`,
+   `track_*`, `lock_changed`), with fresh states at most every 100 ms. A
+   session that falls behind gets a fresh state instead of the events it
+   missed.
+3. **Group streams**: one unidirectional stream per track per group. For
+   video a group is a GOP starting with its keyframe; for data it is one
+   message (`latest`) or a window of them (`stream`).
+4. **Datagrams**: channel messages into a broadcast, the owner's acks, lock
+   heartbeats and their echoes (all routed by the relay to and from the
+   right session, after permission and lock checks), and the frames of
+   `datagram` data tracks.
 
-**2. Events stream.** One unidirectional stream per session carries the
-room ([`crates/tq-wire/src/room.rs`](crates/tq-wire/src/room.rs)):
-
-```text
-type=0x02 ver=1, then per message: len:u32 JSON
-```
-
-The relay opens one to each operator and viewer. It starts with a `state`
-(the room as of event `seq`), then sends every event in order, each with
-the next `seq`:
-
-| Event | When |
-| --- | --- |
-| `participant_joined` / `participant_left` | an operator or viewer session joins (after its `hello`) or ends |
-| `publisher_connected` / `publisher_disconnected` | the robot connects, drops (`disconnected`) or is taken over by a new session (`replaced`) |
-| `track_published` / `track_updated` / `track_unpublished` | a camera appears in, changes in or leaves the publisher's announce; tracks of a publisher that does not come back within `--track-grace-secs` (30) are unpublished |
-| `track_online` / `track_offline` | a camera's source starts or stops producing, or the publisher drops |
-| `operator_changed` | the claim is `claimed`, `forced`, `released`, or freed because the holder `left` |
-| `deadman_tripped` / `deadman_cleared` | the robot safe-stops or re-arms |
-
-A new `state` follows whenever the room changes (at most every 100 ms). It
-also carries the live numbers (fps, RTT, clock offset), which are not
-events. A session that falls behind gets a fresh `state` instead of the
-events it missed. Events are encoded once on the relay and fanned out to
-every session.
-
-The publisher opens one to the relay too, and sends the edges only the
-robot sees: `track_online`/`track_offline` and
-`deadman_tripped`/`deadman_cleared`, timestamped where they happened. It
-starts with the current value of each; the relay drops whatever changes
-nothing and numbers the rest into the room's sequence.
-
-**3. GOP streams.** There is one unidirectional stream per camera per GOP:
-
-```text
-type=0x01 ver=1 camera:u16 group:u64 codec_len:u8 codec
-then per frame: len:u32 index:u32 flags:u8 capture_us:u64 publisher_us:u64 relay_us:u64 frame_id:u32 payload(Annex B AU)
-```
-
-A group starts with its keyframe, which carries its parameter sets. Newer
-groups get a higher QUIC stream priority. Each hop renumbers groups so they
-stay monotonic across publisher restarts.
-
-The control and events streams are sent at a priority above every GOP
-stream, so they never queue behind video on a full link.
-
-**4. Datagrams.** Teleop `command` (0x10), `ack` (0x11), `heartbeat` (0x12)
-and `echo` (0x13). Each carries a sequence number and the sender's own
-timestamp, so RTT needs no clock sync. The relay forwards them only to and
-from the session that holds the operator claim.
+The control and events streams are sent at a priority above every group
+stream, and tracks are ordered by their own priority, so control never
+queues behind video and bulk data never delays it.
 
 ### Why one stream per GOP
 
@@ -280,11 +290,11 @@ from MoQ.
 
 ### Drop policy (`GroupSender`)
 
-| Hop | Old GOP when a new keyframe arrives | Late frame |
+| Hop | Old group when a new one starts | Late frame |
 | --- | --- | --- |
-| publisher → relay | reset immediately | dropped once older than `max_lag_ms` (400); skip to next keyframe |
-| relay → operator | reset immediately | `--operator-max-lag-ms` (250) |
-| relay → viewer | `--viewer-keep-groups` (1) older GOPs may finish | `--viewer-max-lag-ms` (1500) |
+| owner → relay | reset immediately | dropped once older than `max_lag_ms` (400); skip to next keyframe |
+| relay → `realtime` subscription (default) | reset immediately | `--realtime-max-lag-ms` (250) |
+| relay → `smooth` subscription | `--smooth-keep-groups` (1) older groups may finish | `--smooth-max-lag-ms` (1500) |
 
 "Late" is measured from when the frame arrived on this node. Writes are
 bounded by the QUIC `send_window` (1 MiB). Once it is full, a frame can't
@@ -297,20 +307,25 @@ keyframe.
 
 There is no encoder control hook: the encoder is a separate process. A skip
 therefore recovers at the encoder's periodic IDR (1 s in gstreamer-source).
-Keyframe requests are still sent all the way to the publisher, which logs
-them, so an encoder hook can be added there.
+Keyframe requests are still sent all the way to the owner, which logs
+them, so an encoder hook can be added there. A track nobody subscribes to
+is not sent at all.
 
-### Teleop and dead-man (publisher)
+### Teleop and the dead-man switch
 
-Commands are latest-wins by `seq`. The robot is safe-stopped (tripped)
-whenever any of these is true:
-- there is no operator, or the operator changes;
+Teleop is built from general parts (`crates/tq-teleop`): the robot's
+broadcast has a `drive` channel behind a `drive` lock, an open `estop`
+channel, and `.status` / `.events` data tracks. The relay only lets the
+lock's holder send on `drive` or heartbeat the lock. Commands are
+latest-wins by `seq`. The lock's watchdog, run by the robot, keeps it
+safe-stopped (tripped) whenever any of these is true:
+- nobody holds the lock, or the holder changes;
 - no heartbeat has arrived for `heartbeat_loss_ms` (500);
 - commands have started and then stopped for `command_stale_ms` (500);
 - the relay connection drops.
 
 It stays tripped until the next accepted command. `LoggingSink` stands in
-for the robot interface (`TeleopSink`).
+for the robot interface (`tq_teleop::Sink`).
 
 ## Measuring
 
@@ -319,16 +334,16 @@ Both the page overlay and `tq-probe` report latency per hop. Each line is
 
 | Line | Measured from → to | Clock(s) |
 | --- | --- | --- |
-| `capture→pub` | SEI capture timestamp → publisher has the whole access unit. Covers the camera pipeline after the driver timestamp, encode, TCP and AU assembly. | robot only |
-| `pub→relay` | publisher → relay received the frame (the uplink) | robot ↔ relay offset |
+| `capture→pub` | SEI capture timestamp → the owner has the whole access unit. Covers the camera pipeline after the driver timestamp, encode, TCP and AU assembly. | robot only |
+| `pub→relay` | owner → relay received the frame (the uplink) | robot ↔ relay offset |
 | `relay→browser` | relay → the frame's last byte read in the worker | relay ↔ browser offset |
 | `decode` | `VideoDecoder.decode()` → output callback | browser only, exact |
 | `capture→drawn` | capture → `drawImage` returned | both offsets |
 | `draw→display≈` | `drawImage` → estimated scan-out: the next animation frame plus one refresh interval. Panel response time is not included. | browser only, estimate |
 | `glass→glass≈` | capture → estimated scan-out, plus `?sensor_ms=` | both offsets |
 
-The `±… sync` figure is the worst-case clock error. The relay pings the
-publisher, and the browser pings the relay, every 500 ms. Each side keeps
+The `±… sync` figure is the worst-case clock error. The relay pings every
+session, and every session pings the relay, every 500 ms. Each side keeps
 the last 20 samples and uses the one with the smallest round trip (the NTP
 clock-filter idea), because queueing in one direction biases the offset by
 up to half the round trip. Half that best round trip bounds the error, and
@@ -355,7 +370,7 @@ below) and pass the result as `?sensor_ms=`.
   machines. This gets the wall clocks within about 1 ms, and the in-band
   offsets then only cross-check them.
 
-Results from 2026-10-06 on one MacBook: VideoToolbox test sources, links
+Results from 2026-10-06 on one MacBook, protocol 2.0: VideoToolbox test sources, links
 emulated with `tq-impair` on the publisher uplink only, 45 s per run. These
 are emulated links, not real Starlink.
 
@@ -387,6 +402,9 @@ RTT does.
   periodic IDR.
 - No WebSocket/qmux fallback for browsers without WebTransport (Safari).
 - Only the relay can mint tokens. There is no registry or discovery: one
-  relay serves robots by id from the URL.
+  relay serves rooms by id from the URL.
+- The consoles drive only the first broadcast in a room that has a `drive`
+  lock, and show only video tracks plus `.status`/`.events`; data widgets
+  come with the layout spec (roadmap phase 3).
 - Relay HTTP is plain HTTP. Remote browsers need HTTPS in front of it, or
   a real certificate.

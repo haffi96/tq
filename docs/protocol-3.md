@@ -1,7 +1,10 @@
 # tq protocol 3.0
 
-Status: draft for Phase 1 of the [roadmap](roadmap.md). It replaces 2.0
-(`crates/tq-proto`, now `crates/tq-wire`) and does not interoperate with it.
+Status: implemented in `crates/tq-wire` (wire types), `crates/tq-relay`
+and the `crates/tq` SDK; `web/src/protocol.ts` mirrors the wire types. Where
+this document and the code disagree, the code is right and this is a bug.
+3.0 replaces 2.0 (`tq-proto`) and does not interoperate with it. Items
+marked *planned* are not implemented yet.
 
 3.0 keeps what already works in 2.0: one WebTransport session per hop,
 groups on their own streams with newest first, per-hop timestamps, the
@@ -17,7 +20,7 @@ All integers are big endian. Times are Unix microseconds.
 | --- | --- |
 | **room** | A namespace on the relay. Everything below lives in one. |
 | **session** | One WebTransport connection to the relay. A robot, a browser and tq-app are all sessions. What a session may do comes from its token, not from its kind. |
-| **broadcast** | A named bundle a session publishes: tracks, channels and locks. A robot publishes `rover-7`; an operator's console might publish `alice` with a gamepad track. Named `<room>/<broadcast>`. |
+| **broadcast** | A named bundle a session publishes: tracks, channels and locks. A robot publishes `rover-7`; an operator's console might publish `alice` with a gamepad track. Names are unique in a room. |
 | **track** | One stream inside a broadcast: `video` or `data`. Addressed as `<broadcast>/<track>`. |
 | **channel** | A message lane *into* a broadcast: other sessions send, the broadcast's owner receives. Commands, set-points, buttons. |
 | **lock** | Makes some of a broadcast's channels exclusive to one session at a time. |
@@ -43,7 +46,10 @@ publishes video and telemetry tracks and owns a `drive` channel behind a
     online or offline).
   - **Group streams**: unidirectional, one per track per group, in either
     direction.
-  - **Datagrams**: channel messages, lock heartbeats, acks and echoes.
+  - **Datagrams**: channel messages, lock heartbeats, acks and echoes, and
+    the frames of datagram tracks.
+
+Names (broadcasts, tracks, channels, locks) are 1–64 of `[A-Za-z0-9_.-]`.
 
 ## Handshake
 
@@ -83,8 +89,10 @@ nothing else. Every session with a valid token for the room gets the room
 state and room events (who is there, which broadcasts and tracks exist,
 who holds which lock).
 
-Presets for dev tokens: **operator** = `sub:*/* write:*/* lock:*/* force:*/*`,
-**viewer** = `sub:*/*`, **robot** = `pub:<name>`.
+Presets (`tq-relay token --preset`, `/api/dev/token?preset=`): **operator**
+= `sub:*/* write:*/* lock:*/* force:*/*`, **viewer** = `sub:*/*`, **robot**
+= `pub:<name>` (never minted over HTTP). A string that does not parse allows
+nothing but is kept, so a token from a newer minor still works for the rest.
 
 Later minors may add: room state filtered per session, so unreadable tracks
 are hidden instead of refused; rate and bandwidth limits per permission;
@@ -118,50 +126,62 @@ whenever something changes. A session may advertise several broadcasts. A
   ] }
 ```
 
-- The relay answers `advertise_ok {broadcast, relay_us}` or
-  `advertise_error {broadcast, reason}`. The relay diffs each new
-  advertisement against the previous one and emits `track_published`,
+- The relay answers `advertise_ok {broadcast, index, relay_us}` or
+  `advertise_error {broadcast, reason}`. `index` is the broadcast's index
+  on this session's owner hop (see [Indices](#indices)). The relay diffs each
+  new advertisement against the previous one and emits `track_published`,
   `track_updated` and `track_unpublished` events.
+- `unadvertise {broadcast}` removes a broadcast at once.
+- Once a second, an owner may send `track_stats {broadcast, tracks: [{id,
+  dropped}]}`: what it dropped before the relay. The relay measures the rest
+  (frames, fps, kbps, capture latency) itself.
 - A newer session advertising the same broadcast name replaces the older
   one, whose session closes with `REPLACED` if that was its only broadcast.
   This is how a robot that reconnects takes its place back.
 - `watchdog` is informational. The owner enforces it, and apps can show it.
 - Track `meta` and channel `schema` are optional free-form JSON for apps
   (units, ranges, field descriptions). The relay passes them through.
-- Track ids that start with `.` are conventions the SDK fills in:
-  - `.status`: low-rate device state (mode, battery, faults).
-  - `.events`: anything the owner wants in an event log, plus its watchdog
-    edges (`watchdog_tripped`, `watchdog_cleared`).
+- Track ids that start with `.` are conventions:
+  - `.status`: low-rate device state (mode, battery, faults), `latest`.
+  - `.events`: anything the owner wants in an event log, `stream`. The SDK
+    writes its watchdog edges here (`{"type": "watchdog_tripped", "lock",
+    "reason"}`, `{"type": "watchdog_cleared", "lock"}`).
 
   They are ordinary data tracks, so the same permissions apply (a token can
   allow `sub:rover-7/.status` and nothing else).
 
 ### Indices
 
-Group streams and datagrams name tracks, channels and locks by `u16`
-indices instead of strings.
+Group streams and datagrams name things by two `u16`s: a broadcast index
+and a track, channel or lock index.
 
-- **Owner ↔ relay:** an index is the position in the owner's latest
-  advertisement of that broadcast, plus a `u16` broadcast index: the
-  position of that broadcast among the session's advertised broadcasts.
-- **Relay ↔ subscriber:** an index is the room-wide index the relay
-  assigned, listed in the room state.
+- The **track, channel or lock index** is its position in the broadcast's
+  latest advertisement, on every hop. The room state lists it.
+- The **broadcast index** depends on the hop. Owner ↔ relay: the owner's
+  own index, from `advertise_ok` (its broadcasts in advertise order).
+  Relay ↔ subscriber: the room's index, from the room state, which stays
+  the same for as long as the broadcast exists.
 
-The relay rewrites indices as it forwards. Room indices stay the same for
-as long as the track, channel or lock exists in the room.
+The relay rewrites the broadcast index as it forwards. A re-advertisement
+that reorders a broadcast's lists changes the other indices; receivers
+follow the room state.
 
 ## Subscribing
 
 A session gets only the tracks it asks for:
 
 ```text
-subscribe   { tracks: ["rover-7/front", { "track": "rover-7/imu", "max_rate_hz": 60 }] }   (adds)
+subscribe   { tracks: ["rover-7/front", { "track": "rover-7/imu", "max_rate_hz": 60, "policy": "smooth" }] }   (adds)
 unsubscribe { tracks: ["rover-7/front"] }
 subscribe_result { track, ok, reason }
+keyframe_request { track, reason }      (subscriber -> relay -> owner, at most 1 per track per 500 ms)
 ```
 
-- Each track needs `sub:`. Subscriptions persist when a track goes offline
-  and comes back.
+- Each track needs `sub:`. Subscribing again replaces the options.
+  Subscriptions persist when a track goes offline and comes back.
+- `policy` picks the relay's drop policy for this subscriber: `realtime`
+  (default; drop to the next group as soon as a frame is 250 ms late) or
+  `smooth` (1.5 s, and older groups may finish). The relay's flags set both.
 - A subscription to a track that does not exist yet waits for it.
 - The relay forwards a track from its owner only while someone subscribes,
   and tells the owner with `track_demand {track, subscribers}`. An owner may
@@ -172,16 +192,17 @@ subscribe_result { track, ok, reason }
 ## Group streams
 
 ```text
-group stream := type:u8 (=0x01) version:u8 (=2) track:u16 group:u64
-                codec_len:u8 codec:utf8[codec_len]
+group stream := type:u8 (=0x01) version:u8 (=2) broadcast:u16 track:u16
+                group:u64 codec_len:u8 codec:utf8[codec_len]
                 frame*
 frame        := len:u32 index:u32 flags:u8 capture_us:u64 publisher_us:u64
                 relay_us:u64 frame_id:u32 payload
 ```
 
-This is 2.0's format with `camera` renamed to `track` and the version bumped
-to 2. On the owner → relay hop, `track` is preceded by `broadcast:u16`. Flags:
-bit 0 `KEY`, bit 1 `CAPTURE_FROM_SEI`. A frame holds at most 16 MiB.
+2.0's format with `camera:u16` replaced by `broadcast:u16 track:u16` and the
+version bumped to 2. Flags: bit 0 `KEY`, bit 1 `CAPTURE_FROM_SEI`. A frame
+holds at most 16 MiB. Group numbers increase per track; each node renumbers
+them, so they only mean something on one hop.
 
 **Video tracks.** A group is a GOP: it starts with a keyframe carrying its
 parameter sets, and the payload is one Annex B access unit. `codec` is the
@@ -223,19 +244,21 @@ more than any limit.
   arm is here now".
 - `stream` delivers every sample in order on one stream per window. A lost
   packet holds the samples behind it for about one round trip.
-- **Batching** (SDK option, `stream` only): the owner packs samples that
-  arrive within `batch_ms` into one frame, each with its own time offset.
-  This cuts per-frame overhead at kHz rates, at the cost of up to
-  `batch_ms` of extra latency. Off by default.
+- **Batching** (*planned* SDK option, `stream` only): the owner packs
+  samples that arrive within `batch_ms` into one frame, each with its own
+  time offset. This cuts per-frame overhead at kHz rates, at the cost of up
+  to `batch_ms` of extra latency. Off by default.
 
 Datagram track frames:
 
 ```text
-0x24 track_frame  track:u16 seq:u32 flags:u8 capture_us:u64 publisher_us:u64
-                  relay_us:u64 payload
+0x24 track_frame  broadcast:u16 track:u16 seq:u32 flags:u8 capture_us:u64
+                  publisher_us:u64 relay_us:u64 payload
 ```
 
-On the owner hop, `track` is preceded by `broadcast:u16`. The whole datagram
+The relay writes `relay_us` and the room's broadcast index once and sends
+the same bytes to every subscriber. It keeps the newest frame for new
+subscribers. The whole datagram
 must fit in 1100 bytes. Datagrams may arrive out of order. A receiver
 showing the newest value drops any `seq` older than the last one it saw,
 and a receiver plotting inserts by `capture_us`.
@@ -289,31 +312,27 @@ users, then peer-to-peer QUIC.
 ## Channels and datagrams
 
 ```text
-subscriber <-> relay: type:u8      body
-relay <-> owner:      type:u8 sid:u32 body       (sid = the sending session)
-
-0x20 message    id:u16 (channel) seq:u32 sent_us:u64 payload
-0x21 ack        id:u16 (channel) seq:u32 echo_us:u64 status:u8 detail:utf8
-0x22 heartbeat  id:u16 (lock)    seq:u32 sent_us:u64
-0x23 echo       id:u16 (lock)    seq:u32 echo_us:u64 flags:u8
+0x20 message    sid:u32 broadcast:u16 channel:u16 seq:u32 sent_us:u64 payload
+0x21 ack        sid:u32 broadcast:u16 channel:u16 seq:u32 echo_us:u64 status:u8 detail:utf8
+0x22 heartbeat  sid:u32 broadcast:u16 lock:u16    seq:u32 sent_us:u64
+0x23 echo       sid:u32 broadcast:u16 lock:u16    seq:u32 echo_us:u64 flags:u8
 ```
 
 Type `0x24` is a datagram track frame; see [High-rate data](#high-rate-data).
-It travels owner → relay → subscribers like any track, so it carries no
-`sid`.
 
-- `id` follows the index rules above. On the owner hop it is preceded by
-  `broadcast:u16`.
-- The relay adds the sender's `sid` on the way to the owner, and the owner
-  puts the target's `sid` on acks and echoes. The relay strips `sid` and
-  forwards to that session only.
+- Indices follow the [rules above](#indices).
+- `sid` routes: a sender writes 0, and the relay writes the sender's `sid`
+  on the way to the owner. The owner writes the target's `sid` on acks and
+  echoes, and the relay forwards them to that session only. The fixed
+  layout lets the relay rewrite `sid` and `broadcast` in place.
 - **Relay checks:** a message needs `write:` on the channel, and, if the
   channel belongs to a lock, the sender must hold it. A heartbeat needs the
   sender to hold the lock. Anything else is dropped and counted; it never
   reaches the owner.
 - **Sequencing:** latest wins per channel and sender. A `seq` at or below
-  the last one applied is acked `superseded` and not applied. The sequence
-  restarts when a lock's holder changes.
+  the last one applied is acked `superseded` and not applied (the SDK does
+  this before the app sees the message). The sequence restarts when a
+  lock's holder changes.
 - **Ack status:** `0 ok`, `1 superseded`, `2 rejected`, `3 malformed`.
 - **Echo flags:** bit 0 `TRIPPED`, meaning the lock's watchdog has tripped.
 - `sent_us` and `echo_us` are on the sender's clock and only compared with
@@ -331,14 +350,16 @@ acks) is planned for 3.1 as `"mode": "reliable"` on the channel.
 session -> relay: claim   { lock: "rover-7/drive", force }
                   release { lock }
 relay -> session: claim_result { lock, ok, holder, reason }
-relay -> owner:   lock_holder  { broadcast, lock, sid }        (sid null = free)
+relay -> owner:   lock_holder  { lock, sid, session }          (null = free)
 event:            lock_changed { lock, from, to, reason }
                   reason: claimed | forced | released | left
 ```
 
-The relay owns locks. A holder's session ending frees its locks. `force`
-needs `force:`. `state.locks` maps each lock to its holder's session, or
-null.
+The relay owns locks. A holder's session ending frees its locks. Claiming
+needs `lock:` (or `force:`); taking a held lock needs `force:` and
+`force: true`. Holders survive an owner's outage: when the owner comes
+back, it is told the current holders again. The room state lists each
+lock's holder.
 
 ## Watchdog
 
@@ -351,23 +372,25 @@ sending. It trips when:
 - after messages have started, they stop for `message_stale_ms`;
 - the owner's relay connection drops.
 
-It stays tripped until the next accepted message. Trips and clears are
-reported on the holder's echoes and on the broadcast's `.events` track.
-Teleop's dead-man switch is exactly this, on the `drive` lock.
+It stays tripped until the next accepted message (the owner's app acks it
+`ok`). Trips and clears are reported on the holder's echoes and on the
+broadcast's `.events` track. Teleop's dead-man switch is exactly this, on
+the `drive` lock (`crates/tq-teleop`).
 
 ## Room state and events
 
-As in 2.0: the events stream starts with a `state`, then sequenced events,
-with fresh states at most every 100 ms.
+As in 2.0: the events stream (type `0x02`, version 2) starts with a
+`state`, then sequenced events, with fresh states at most every 100 ms.
 
 ```text
 RoomState {
   room_id,
-  broadcasts: [{ name, owner_sid, build,
+  broadcasts: [{ index, name, owner, owner_sid, build,
                  rtt_ms, clock_offset_us, clock_error_us, quic,
                  tracks:   [{ index, info: TrackInfo, online,
                               stats: { frames, groups, fps, kbps, dropped,
-                                       capture_to_publisher_ms } }],
+                                       capture_to_publisher_ms, codec_string,
+                                       subscribers } }],
                  channels: [{ index, info: ChannelInfo }],
                  locks:    [{ index, info: LockInfo, holder }] }],
   participants: [{ session, sid, sub, perms, build, joined_us }],
@@ -375,10 +398,18 @@ RoomState {
 ```
 
 Relay events: `participant_joined`, `participant_left`,
-`broadcast_started`, `broadcast_ended {reason: ended | disconnected | replaced}`,
-`track_published`, `track_updated`, `track_unpublished`, `track_online`,
-`track_offline`, `lock_changed`. Unknown event and message types are
-ignored, so minors can add them.
+`broadcast_started {broadcast, owner, build}`,
+`broadcast_stopped {broadcast, reason: disconnected | replaced | unadvertised}`
+(the broadcast stays, offline, for the grace period),
+`broadcast_removed {broadcast}`, `track_published {track, info}`,
+`track_updated {track, info}`, `track_unpublished {track}`,
+`track_online {track}`, `track_offline {track, reason}`,
+`lock_changed {lock, from, to, reason}`. A publishing session sends
+`track_online` and `track_offline` for its own tracks; the relay sends the
+rest. Unknown event and message types are ignored, so minors can add them.
+
+Every second the relay also sends each session `link_stats {quic}`, the
+QUIC stats of its own connection.
 
 ## Clocks and latency
 
@@ -403,21 +434,20 @@ filter); half that round trip bounds the error.
   both error bounds. Apps show the bound next to every cross-machine number.
 
 SEI capture times are on the encoder's clock. 3.0 assumes the encoder runs
-on the owner's machine or on a clock synced with it. A source may declare
-`capture_clock_offset_us` in its config when it knows better (for example,
-an encoder on another box synced by PTP).
+on the owner's machine or on a clock synced with it. *Planned:* a source
+may declare `capture_clock_offset_us` in its config when it knows better
+(for example, an encoder on another box synced by PTP).
 
-Glass-to-glass = present (subscriber) − capture (converted). The SDK's
-`Clock` type does the conversion. Apps never subtract raw timestamps taken
-on different machines.
+Glass-to-glass = present (subscriber) − capture (converted). In the SDK,
+`Session::owner_offset(broadcast)` gives owner − me as a `tq_wire::Offset`
+whose `to_local()` does the conversion. Apps never subtract raw timestamps
+taken on different machines.
 
 ## Multiple broadcasts
 
-The wire format allows any number of broadcasts per room and per session.
-Phase 1 aims to support many per room, one per session. If that proves
-expensive, the relay may cap a room at one broadcast in 3.0 and lift the
-cap in a minor. Nothing on the wire changes either way: indices are already
-per broadcast on the owner hop and room-wide on the subscriber hop.
+Any number of broadcasts per room and per session, from different
+sessions. The relay supports this as implemented; the consoles (web,
+tq-app) currently drive only the first broadcast with a `drive` lock.
 
 ## Close codes
 
@@ -439,9 +469,9 @@ per broadcast on the owner hop and room-wide on the subscriber hop.
 | publisher vs operator vs viewer | sessions; any of them may publish broadcasts |
 | `announce {cameras}` | `advertise {broadcast, tracks, channels, locks}` |
 | every client gets every camera | explicit `subscribe` / `unsubscribe`; owners see demand |
-| group header `camera:u16`, version 1 | `track:u16` (plus `broadcast:u16` on the owner hop), version 2; per-track priority |
+| group header `camera:u16`, version 1 | `broadcast:u16 track:u16`, version 2; per-track priority |
 | `Role` in the token | `perms` with path patterns; `sid` in `welcome` |
-| datagrams 0x10–0x13, teleop only, claim holder only | 0x20–0x23, per channel or lock, `sid` routing |
+| datagrams 0x10–0x13, teleop only, claim holder only | 0x20–0x23, per channel or lock, `sid` routing; 0x24 datagram track frames |
 | `claim {force}`, `release`, `operator_changed` | `claim {lock, force}`, `release {lock}`, `lock_changed` |
-| `TeleopStatus`, `deadman_*` events | `.status` and `.events` data tracks; watchdog edges |
+| `publisher_status`, `TeleopStatus`, `deadman_*` events | relay-measured track stats, `track_stats` from owners; `.status` and `.events` data tracks |
 | `state.publisher`, `state.operator` | `state.broadcasts[]` with tracks, channels, locks and holders |

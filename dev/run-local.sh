@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the whole stack on one machine:
-#   gstreamer-source (H.264 :5010, H.265 :5011) -> tq-publisher -> [tq-impair] -> tq-relay -> browser
+#   gstreamer-source (H.264 :5010, H.265 :5011) -> tq-publisher -> [tq-impair] -> tq-relay -> consoles
 #
 #   dev/run-local.sh                 # direct
 #   IMPAIR=starlink dev/run-local.sh # publisher uplink through the Starlink profile
@@ -44,7 +44,7 @@ fi
 pids+=($!)
 
 echo
-echo "operator: http://localhost:8080/?room=robot-01&role=operator"
-echo "viewer:   http://localhost:8080/?room=robot-01&role=viewer"
+echo "operator: http://localhost:8080/?room=robot-01&preset=operator"
+echo "viewer:   http://localhost:8080/?room=robot-01&preset=viewer"
 echo
 wait
