@@ -36,44 +36,81 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 
 ## Current state (handoff)
 
-Branch `generalize-core`. Phase 1 is done, and so is the Rust half of
-Phase 2 (see below). Read [protocol-3.md](protocol-3.md) for the wire
-format, `crates/tq/src/lib.rs` for the SDK, and
-`crates/tq-relay/src/tests.rs` for worked examples of every feature.
+Updated 2026-10-31. Branch `generalize-core`, open as a PR against
+`main`. Phase 1 is done; Phase 2's Rust half is done, tq-edge included
+(see below). Start with [protocol-3.md](protocol-3.md) for the wire
+format, `crates/tq/src/lib.rs` for the SDK, `crates/tq-relay/src/tests.rs`
+for worked examples of every feature, and [install.md](install.md#the-config)
+for tq-edge's config.
 
-**Verified:**
-- `cargo test`: workspace tests, including the relay's end-to-end tests.
-- `cargo clippy --all-targets`: clean.
+**Where things are:**
+- `crates/tq`: the SDK. `Session` (one connection), `Client` (reconnects,
+  resubscribes, republishes), `Session::hold` (claim + heartbeat a lock),
+  `Frame::hops()` / `capture_local_us()` (timestamps on the local clock),
+  `tq::discover` (relay info, dev tokens, `Options::discover`).
+- `crates/tq-teleop`: drive channel behind a dead-man lock, the remote
+  stop (latching), `.status` / `.events`.
+- `crates/tq-edge`: the device agent (was tq-publisher). Config-driven:
+  tracks fed by sources (`src/source/`, `tcp` today), channels feeding
+  sinks (`src/sink.rs`: `log`, `tcp`), optional teleop with its own sink.
+- Consoles: `web/` and `crates/tq-app` (GPUI), both on protocol 3.0.
+
+**Verified (all on the current branch head):**
+- `cargo test` and `cargo clippy --all-targets`: clean, including the
+  relay's end-to-end tests (13), tq-edge's config tests and the SDK's.
 - `cargo build -p tq-app && cargo clippy -p tq-app --all-targets`: clean.
   tq-app is not a default member, so plain `cargo build` skips it.
 - `cd web && bun run typecheck && bun run build`: passes.
-- Live teleop through tq-probe with the real encoders.
-- Both consoles against `dev/run-local.sh` (2026-10-31): H.264 and H.265
-  video, claim, WASD and 20 Hz streaming (acks ok, the robot counts the
-  commands), the stale-message trip, remote stop, release, and force-claim
-  between the web console and tq-app in both directions.
+- Live against `dev/run-local.sh`: both consoles (video on H.264 and
+  H.265, claim, WASD and 20 Hz streaming, stale-message trip, remote stop
+  from another operator, re-arm, release, force-claim both ways); a relay
+  restart under tq-edge and tq-app (both reconnect, video resumes, the
+  lock comes back free); tq-edge's full example with a stand-in device
+  program (data source, channel sink, teleop sink, refusals while the
+  program is gone).
 
-**Headless end-to-end check** (needs `../streaming-tools`): with
-`dev/run-local.sh` running, run
-`TQ_SHARED_SECRET=dev-secret-change-me ./target/release/tq-probe --room robot-01 --preset operator --teleop-hz 20 --duration 8 --json`.
-Expect:
-- both video tracks at about 30 fps, with `capture_to_probe_ms` p50 in the
-  tens of ms;
-- every drive command acked `Ok`;
-- `deadman_tripped: false`.
+**Regression check** (needs `../streaming-tools` next to this repo, or
+`STREAMING_TOOLS=…`): run `dev/run-local.sh` (or
+`CONFIG=config/edge.full.example.json dev/run-local.sh` with programs on
+:6000–6002), then
+`TQ_SHARED_SECRET=dev-secret-change-me ./target/release/tq-probe --room robot-01 --preset operator --teleop-hz 20 --duration 8 --json`
+(add `--send 'robot-01/lights={"on":true}'` to try a channel). Expect
+both video tracks at about 30 fps with `capture_to_probe_ms` p50 in the
+tens of ms, every drive command acked `Ok`, and `deadman_tripped: false`.
+Then open `http://localhost:8080/?room=robot-01&preset=operator` and run
+`./target/release/tq-app --preset operator`.
 
-**Remote stop (decided 2026-10-31):** a remote stop stops the robot under all
-circumstances. Both consoles' STOP (button and Space) send on every
-robot's `stop` channel until acked, and let go of their own drive lock.
-The robot latches: it rejects drive commands until its drive lock is
-claimed again (Claim while holding re-claims). Release is the separate,
-non-stopping way to let go. See the Watchdog section of protocol-3.md.
-It is named a remote stop, not an E-stop: in the field an E-stop is a
-physical button on a separate, safety-rated link, which this does not
-replace.
+**Remote stop (decided 2026-10-31, safety-critical):** a remote stop must
+stop the robot under all circumstances. Both consoles' STOP (button and
+Space) send on every robot's `stop` channel, resend every 50 ms until
+acked (2 s, then the log says no answer), and let go of their own drive
+lock. Space is taken before any focused control can act on it. The robot
+latches: it rejects drive commands until its drive lock is claimed again
+at least 500 ms later (Claim while holding re-claims); a robot reconnect
+does not re-arm it (claims are numbered). Release lets go without
+stopping. It is a remote stop, not an E-stop: in the field an E-stop is a
+physical button on its own safety-rated link, which this does not
+replace. Keep all of this when touching the stop, the drive lock or
+console key handling.
 
-**Consoles today** drive only the first broadcast in a room that has a
-`drive` lock, and show only video tracks plus `.status` and `.events`.
+**Known gaps and notes:**
+- Consoles drive only the first broadcast with a `drive` lock, and show
+  only video tracks plus `.status` and `.events` (Phase 3 fixes this).
+- A killed relay does not close connections, so clients notice only at
+  the QUIC idle timeout.
+- tq-app at narrow widths: the status bar text overlaps and lock badges
+  overflow. Its "Held by" badge shows a bare session id.
+- Relay replay of `.events` on subscribe is by design; both consoles now
+  log those lines at the time they happened.
+- Testing tip: on this machine the T3 Code app probes every new local
+  listening port with an HTTP `GET /`. Raw TCP test servers must tolerate
+  stray connections. Drive tq-app's GUI with osascript System Events
+  keystrokes (CGEvent key events do not reach it; CGEvent clicks do).
+
+**Next:** Phase 2's "publish a camera and a channel in about 10 lines of
+Rust" (an SDK convenience layer, probably a tq-edge library half). The TS
+client package, golden test vectors and a pyo3 example are lower
+priority. Then Phase 3 (widgets, layout spec, web first).
 
 ## Phases
 
