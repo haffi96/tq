@@ -34,6 +34,46 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 | dead-man | **watchdog** on a lock, run by the owner's SDK |
 | `TeleopStatus`, dead-man events | `.status` and `.events` **data tracks** |
 
+## Current state (handoff)
+
+Branch `generalize-core`. Phase 1 is done, and so is the Rust half of
+Phase 2 (see below). Read [protocol-3.md](protocol-3.md) for the wire
+format, `crates/tq/src/lib.rs` for the SDK, and
+`crates/tq-relay/src/tests.rs` for worked examples of every feature.
+
+**Verified:**
+- `cargo test`: workspace tests, including the relay's end-to-end tests.
+- `cargo clippy --all-targets`: clean.
+- `cargo build -p tq-app && cargo clippy -p tq-app --all-targets`: clean.
+  tq-app is not a default member, so plain `cargo build` skips it.
+- `cd web && bun run typecheck && bun run build`: passes.
+- Live teleop through tq-probe with the real encoders.
+
+**Not verified yet (do this first):** the web console and tq-app have only
+been compiled, never run against a relay. Run `dev/run-local.sh`, open
+`http://localhost:8080/?room=robot-01&preset=operator`, run
+`cargo run --release -p tq-app -- --preset operator`, then claim and
+drive.
+
+**Headless end-to-end check** (needs `../streaming-tools`): with
+`dev/run-local.sh` running, run
+`TQ_SHARED_SECRET=dev-secret-change-me ./target/release/tq-probe --room robot-01 --preset operator --teleop-hz 20 --duration 8 --json`.
+Expect:
+- both video tracks at about 30 fps, with `capture_to_probe_ms` p50 in the
+  tens of ms;
+- every drive command acked `Ok`;
+- `deadman_tripped: false`.
+
+**Open decision:** E-stop. The web console has an E-stop button that sends
+on the robot's open `estop` channel; that channel needs no lock, so it can
+stop a robot someone else is driving. tq-app has no such button: its Space
+key only releases the drive lock. Either keep the button and add it to
+tq-app, or remove it. This is a safety behaviour change, so it is the
+user's call.
+
+**Consoles today** drive only the first broadcast in a room that has a
+`drive` lock, and show only video tracks plus `.status` and `.events`.
+
 ## Phases
 
 Every phase ends with teleop working end to end (`dev/run-local.sh`, both
