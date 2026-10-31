@@ -292,7 +292,8 @@ const number: Def = {
       },
       draw() {
         const n = num(latest);
-        value.textContent = n !== null ? n.toFixed(w.prop('digits', 2)) : latest === undefined ? '–' : String(latest);
+        const digits = Math.min(20, Math.max(0, Math.round(Number(w.prop('digits', 2)) || 0)));
+        value.textContent = n !== null ? n.toFixed(digits) : latest === undefined ? '–' : String(latest);
         unit.textContent = w.prop('unit', '') || unitOf(w.track ? w.app.catalog.track(w.track) : undefined, w.spec.bind?.path ?? '');
         w.root.classList.remove('stale');
       },
@@ -670,7 +671,12 @@ const drive: Def = {
       const holder = lockHolder(app, w.lock);
       state.textContent = why ?? (holder === undefined ? `no lock ${w.lock ?? ''}` : mine() ? `driving ${w.lock}` : holder ? `${w.lock} held by ${app.who(holder)}: claim it to drive` : `${w.lock} is free: claim it to drive`);
       state.className = `drive-state ${mine() ? 'ok' : ''}`;
-      stream.disabled = once.disabled = !!why;
+      // Sending needs the lock: without it the controls would do nothing.
+      // Losing the lock stops streaming, so it does not resume on a claim.
+      const off = why ?? (mine() ? null : `claim ${w.lock ?? 'the lock'} to drive`);
+      stream.disabled = once.disabled = off !== null;
+      stream.title = once.title = off ?? '';
+      if (off !== null) stream.checked = false;
     };
     return {
       update,
@@ -754,7 +760,8 @@ const status: Def = {
       detail.textContent = [
         b ? `${b.name} ${b.owner ? `online · rtt ${fmt(b.rtt_ms, 1)} ms · clock ${fmt(b.clock_offset_us === null ? null : b.clock_offset_us / 1000, 1)} ms` : 'offline'}` : `no broadcast ${w.broadcast ?? ''}`,
         t ? `commands ${t.commands}  last seq ${t.last_seq}  remote stops ${t.stops}` : '',
-        ...(last?.cameras ?? []).map((c) => `${c.id}: ${c.codec ?? '–'} ${c.frames} frames`),
+        // Device data: only an array of cameras is listed.
+        ...(Array.isArray(last?.cameras) ? last.cameras : []).map((c) => `${c?.id}: ${c?.codec ?? '–'} ${c?.frames} frames`),
       ].join('\n');
     };
     return {

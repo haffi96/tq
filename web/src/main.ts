@@ -189,6 +189,7 @@ function renderState() {
     return;
   }
   for (const name of statuses.keys()) if (!state.broadcasts.some((b) => b.name === name)) statuses.delete(name);
+  syncStop();
   document.body.classList.toggle('driving', !!session && state.broadcasts.some((b) => b.locks.some((l) => l.holder === session)));
 
   const pub = $('publisher');
@@ -373,17 +374,23 @@ const typing = (t: EventTarget | null) =>
   t instanceof HTMLSelectElement ||
   (t instanceof HTMLInputElement && !['checkbox', 'radio', 'range', 'button', 'submit'].includes(t.type));
 
-function setupOperator() {
+// Who gets STOP: the operator preset always (before connecting too), and
+// any session whose permissions let it write a stop channel in the room,
+// whatever the URL says. Once set up it stays, so a robot that drops out
+// and comes back can be stopped just the same.
+let stopReady = false;
+function syncStop() {
+  if (stopReady) return;
+  const permitted = (state?.broadcasts ?? []).some(
+    (b) => b.channels.some((c) => c.info.id === STOP) && catalog.can('write', path(b.name, STOP)),
+  );
+  if (preset === 'operator' || permitted) setupStop();
+}
+
+function setupStop() {
+  stopReady = true;
   $('stop').hidden = false;
   $('stop').onclick = remoteStop;
-  window.addEventListener('keydown', (e) => {
-    const k = e.key.toLowerCase();
-    if (['w', 'a', 's', 'd'].includes(k) && !typing(e.target) && !e.metaKey && !e.ctrlKey) {
-      keys.add(k);
-      e.preventDefault();
-    }
-  });
-  window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
   // Space is STOP, everywhere, before anything else sees it (capture
   // phase): a focused button or checkbox would otherwise take it as a click
   // too (a focused Claim would re-claim, a stream box would stream again).
@@ -406,6 +413,18 @@ function setupOperator() {
     },
     true,
   );
+}
+
+// WASD for drive widgets (which send only while their lock is held).
+function setupDriveKeys() {
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (['w', 'a', 's', 'd'].includes(k) && !typing(e.target) && !e.metaKey && !e.ctrlKey) {
+      keys.add(k);
+      e.preventDefault();
+    }
+  });
+  window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
   window.addEventListener('blur', () => keys.clear());
 }
 
@@ -461,7 +480,8 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
 async function start() {
   $('title').textContent = room;
   $('role').textContent = preset;
-  if (preset === 'operator') setupOperator();
+  if (preset === 'operator') setupDriveKeys();
+  syncStop();
   const edit = $('edit');
   edit.onclick = () => board.setEditing(!board.editing);
   renderVersions();

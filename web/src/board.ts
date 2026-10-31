@@ -25,6 +25,9 @@ class Widget implements Host {
   impl: Impl = {};
   isDirty = false;
   visible = true;
+  /** What threw, once a callback has: the widget shows it and stays marked. */
+  failed: string | null = null;
+  readonly error = el('div', 'widget-error');
   /** Spec and resolved paths it was made with: a change remakes it. */
   key = '';
 
@@ -36,8 +39,28 @@ class Widget implements Host {
     this.uid = `${spec.id}#${++uids}`;
     const edit = el('span', 'edit-tools');
     this.head.append(this.title, this.warn, this.tools, edit);
-    this.root.append(this.head, this.body);
+    this.root.append(this.head, this.body, this.error);
     this.warn.hidden = true;
+    this.error.hidden = true;
+  }
+
+  /**
+   * Runs one of the implementation's callbacks. An exception (bad device
+   * data, a prop out of range) marks this widget failed, in plain sight, so
+   * a frozen value never passes for a live one, and never reaches the
+   * other widgets or the board's loops.
+   */
+  run<T>(what: string, fn: () => T): T | undefined {
+    try {
+      return fn();
+    } catch (e) {
+      if (this.failed === null) console.error(`widget ${this.spec.id}: ${what} failed`, e);
+      this.failed = `${what} failed: ${e instanceof Error ? e.message : String(e)}`;
+      this.root.classList.add('failed');
+      this.error.textContent = this.failed;
+      this.error.hidden = false;
+      return undefined;
+    }
   }
 
   prop<T>(key: string, fallback: T): T {
@@ -82,38 +105,40 @@ export class Board {
     private storageKey: string,
   ) {
     this.layout = { version: 1, grid: { cols: 12, row_height: 40 }, widgets: [] };
-    const stored = localStorage.getItem(storageKey);
-    if (stored) {
-      try {
+    // Storage can be blocked (cookies off) or full: the board, and the
+    // page's STOP with it, must start anyway.
+    try {
+      const stored = localStorage.getItem(storageKey);
+      if (stored) {
         const { layout, errors } = parseLayout(JSON.parse(stored));
         if (layout) {
           this.layout = layout;
           this.saved = true;
         } else console.warn('stored layout ignored:', errors);
-      } catch (e) {
-        console.warn('stored layout ignored:', e);
       }
+    } catch (e) {
+      console.warn('stored layout ignored:', e);
     }
     document.body.append(this.dialog);
     this.buildToolbar();
     document.addEventListener('visibilitychange', () => this.queueWants());
     const frame = (now: number) => {
+      requestAnimationFrame(frame);
       const t0 = performance.now();
       for (const w of this.widgets.values()) {
         if (!w.isDirty) continue;
         w.isDirty = false;
-        w.impl.draw?.(now);
+        w.run('draw', () => w.impl.draw?.(now));
       }
       const dt = performance.now() - t0;
       this.ui.sum += dt;
       this.ui.n += 1;
       this.ui.max = Math.max(this.ui.max, dt);
-      requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
     setInterval(() => {
       const now = performance.now();
-      for (const w of this.widgets.values()) w.impl.slow?.(now);
+      for (const w of this.widgets.values()) w.run('slow', () => w.impl.slow?.(now));
     }, 1000);
     this.render();
   }
@@ -137,23 +162,23 @@ export class Board {
   }
 
   data(items: DataItem[]) {
-    for (const d of items) for (const w of this.routes.get(d.track) ?? []) w.impl.data?.(d);
+    for (const d of items) for (const w of this.routes.get(d.track) ?? []) w.run('data', () => w.impl.data?.(d));
   }
 
   acks(items: AckItem[]) {
-    for (const a of items) for (const w of this.widgets.values()) w.impl.ack?.(a);
+    for (const a of items) for (const w of this.widgets.values()) w.run('ack', () => w.impl.ack?.(a));
   }
 
   cameras(stats: Record<Path, CameraStats>) {
     for (const w of this.widgets.values()) {
       const s = w.track ? stats[w.track] : undefined;
-      if (s) w.impl.camera?.(s);
+      if (s) w.run('camera', () => w.impl.camera?.(s));
     }
   }
 
   /** A remote stop went out: every widget stops sending. */
   stopped() {
-    for (const w of this.widgets.values()) w.impl.stopped?.();
+    for (const w of this.widgets.values()) w.run('stopped', () => w.impl.stopped?.());
   }
 
   /** Locks the drive widgets are bound to (a remote stop lets go of them). */
@@ -163,7 +188,7 @@ export class Board {
 
   /** Lines were added to the log. */
   logChanged() {
-    for (const w of this.widgets.values()) if (w.spec.type === 'log') w.impl.update?.();
+    for (const w of this.widgets.values()) if (w.spec.type === 'log') w.run('update', () => w.impl.update?.());
   }
 
   // --- rendering --------------------------------------------------------------------
@@ -198,7 +223,7 @@ export class Board {
       // The layout's spec object may be new (a fresh preset) with the same content.
       (w as { spec: WidgetSpec }).spec = spec;
       this.place(w);
-      w.impl.update?.();
+      w.run('update', () => w.impl.update?.());
       w.isDirty = true;
     }
     this.decorate();
@@ -209,11 +234,7 @@ export class Board {
     const { spec, def } = w;
     w.title.textContent = this.titleOf(w);
     if (def) {
-      try {
-        w.impl = def.create(w);
-      } catch (e) {
-        w.body.textContent = `failed: ${e}`;
-      }
+      w.impl = w.run('create', () => def.create(w)) ?? {};
     } else {
       w.body.append(el('div', 'muted', `unknown widget type "${spec.type}" (made by a newer app?)`));
     }
@@ -225,7 +246,7 @@ export class Board {
   }
 
   private remove(w: Widget) {
-    w.impl.destroy?.();
+    w.run('destroy', () => w.impl.destroy?.());
     this.seen.unobserve(w.root);
     w.root.remove();
     this.widgets.delete(w.spec.id);
@@ -262,7 +283,7 @@ export class Board {
     const merged = new Map<Path, Subscription>();
     this.routes.clear();
     for (const w of this.widgets.values()) {
-      for (const s of w.impl.wants?.() ?? []) {
+      for (const s of w.run('wants', () => w.impl.wants?.()) ?? []) {
         const list = this.routes.get(s.track) ?? [];
         list.push(w);
         this.routes.set(s.track, list);
@@ -345,9 +366,14 @@ export class Board {
     this.decorate();
   }
 
+  // Saves in the browser if it can; the board follows the layout either way.
   private save() {
     this.saved = true;
-    localStorage.setItem(this.storageKey, JSON.stringify(this.layout));
+    try {
+      localStorage.setItem(this.storageKey, JSON.stringify(this.layout));
+    } catch (e) {
+      console.warn('layout not saved (kept until the page reloads):', e);
+    }
     this.render();
   }
 
@@ -359,7 +385,11 @@ export class Board {
     const reset = el('button', '', 'Reset to preset');
     reset.title = 'Forget the saved layout and use the one made from the room';
     reset.onclick = () => {
-      localStorage.removeItem(this.storageKey);
+      try {
+        localStorage.removeItem(this.storageKey);
+      } catch (e) {
+        console.warn('saved layout not removed:', e);
+      }
       this.saved = false;
       this.layout = { ...this.layout, widgets: [] };
       this.update();

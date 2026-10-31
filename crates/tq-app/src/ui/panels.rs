@@ -152,7 +152,7 @@ impl Render for Header {
                 .child(
                     h_flex()
                         .gap_1()
-                        .when(m.operator(), |row| {
+                        .when(m.can_stop(), |row| {
                             let model = model.clone();
                             row.child(
                                 Button::new("header-stop")
@@ -201,7 +201,7 @@ impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = self.model.read(cx);
         let mut col = v_flex().gap_5().p_4();
-        if m.operator() {
+        if m.can_stop() {
             col = col.child(self.control(cx));
         }
         col = col.child(self.latency(cx)).child(self.link(cx)).child(self.about(cx));

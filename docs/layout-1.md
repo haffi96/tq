@@ -92,12 +92,22 @@ A bare id resolves against the widget's `bind.broadcast`, then the layout's
   cannot use.
 - **Permissions decide what binds.** The editor offers only the channels a
   session may `write` and the locks it may `lock`; controls without the
-  permission (or the lock a channel needs) are disabled and say why.
-- **The remote stop is not a widget.** It sits in the app's own header
-  whenever the session may send, with Space as its key, and no layout can
-  remove it. It stops every robot in the room and lets go of the drive
-  locks this console holds (see the roadmap). In the web console Space is
-  STOP even inside text fields.
+  permission (or the lock a channel needs) are disabled and say why. A
+  `drive` widget's controls also wait for its lock: they are disabled
+  until this session holds it, and losing it turns streaming off.
+- **The remote stop is not a widget.** It sits in the app's own header,
+  with Space as its key, and no layout can remove it. It is there for the
+  operator preset, and for any session whose permissions let it write a
+  `stop` channel in the room. It goes to every broadcast that advertises a
+  `stop` channel (tq-teleop's), whoever drives it; the relay drops it where
+  the session may not write. Broadcasts without one (a camera on its own)
+  have nothing to stop. It lets go of the drive locks this console holds
+  (see the roadmap). In the web console Space is STOP even inside text
+  fields.
+- **A widget that fails says so.** An exception in a widget (device data
+  of an unexpected shape, a prop out of range) marks that widget failed,
+  in plain sight, rather than leaving a frozen value that looks live; the
+  other widgets carry on.
 
 ## Storage
 

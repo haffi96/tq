@@ -75,6 +75,8 @@ pub struct Model {
     pub layout_given: bool,
     /// Bumped when `layout` changes.
     pub layout_version: u64,
+    /// A session's permissions have let it write a room's stop channel.
+    stop_permitted: bool,
     ticks: u64,
 }
 
@@ -110,6 +112,7 @@ impl Model {
             layout: Arc::new(layout.unwrap_or_else(|| layout::preset(&RoomState::default(), false))),
             layout_given,
             layout_version: 0,
+            stop_permitted: false,
             shared,
             conn: (ConnState::Connecting, None),
             session: None,
@@ -261,6 +264,15 @@ impl Model {
         self.shared.config.operator()
     }
 
+    /// Whether the app offers the remote stop (button and Space): for the
+    /// operator preset always, and for any session whose permissions let
+    /// it write a stop channel in the room, whatever the preset. Once
+    /// offered it stays, so a robot that drops out and comes back can be
+    /// stopped just the same.
+    pub fn can_stop(&self) -> bool {
+        self.operator() || self.stop_permitted
+    }
+
     /// The stats tick: takes every window the panels and tiles show.
     pub fn tick(&mut self, frame_cost: Win, cx: &mut Context<Self>) {
         let feeds = self.shared.feeds();
@@ -325,6 +337,18 @@ impl Model {
                         self.layout = Arc::new(preset);
                         self.layout_version += 1;
                     }
+                }
+                if let Some(perms) = self.shared.perms() {
+                    self.stop_permitted |= state.broadcasts.iter().any(|b| {
+                        b.channel(session::STOP).is_some()
+                            && perms.allows(tq_wire::Verb::Write, &tq_wire::Path::new(&b.name, session::STOP))
+                    });
+                }
+                // Streaming needs a lock to drive with: losing every lock
+                // turns it off, so a later claim does not resume it.
+                if self.streaming && !self.shared.holds_any() {
+                    self.streaming = false;
+                    self.update_drive(cx);
                 }
                 self.state = Some(state);
                 self.note_owners();

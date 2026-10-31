@@ -980,7 +980,9 @@ impl WidgetView {
                     .checked(streaming)
                     .label(format!("Stream {rate:.0} Hz"))
                     .small()
-                    .disabled(!m.operator())
+                    // Sending needs the lock: without it the switch would
+                    // do nothing.
+                    .disabled(!m.operator() || !mine)
                     .on_click(move |on: &bool, _, cx| {
                         let on = *on;
                         model.update(cx, |m, cx| {

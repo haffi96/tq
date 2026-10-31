@@ -128,7 +128,7 @@ impl AppView {
     /// switch would otherwise take it as a click too (a focused Claim
     /// would re-claim, a focused Stream switch would stream again).
     fn on_capture_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if e.keystroke.key != "space" || !self.model.read(cx).operator() {
+        if e.keystroke.key != "space" || !self.model.read(cx).can_stop() {
             return;
         }
         window.prevent_default();
@@ -139,7 +139,7 @@ impl AppView {
     }
 
     fn on_capture_key_up(&mut self, e: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if e.keystroke.key == "space" && self.model.read(cx).operator() {
+        if e.keystroke.key == "space" && self.model.read(cx).can_stop() {
             window.prevent_default();
             cx.stop_propagation();
         }

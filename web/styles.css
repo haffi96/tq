@@ -36,6 +36,8 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
 .widget { grid-column: var(--x) / span var(--w); grid-row: var(--y) / span var(--h); position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .widget.stale { border-color: var(--warn); }
 .widget.offline { border-color: var(--bad); }
+.widget.failed { border-color: var(--bad); }
+.widget-error { padding: 2px 6px; font-size: 11px; color: #fff; background: var(--bad); }
 .widget .head { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 12px; white-space: nowrap; }
 .widget .title { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .widget .tools, .widget .edit-tools { display: flex; gap: 4px; }
