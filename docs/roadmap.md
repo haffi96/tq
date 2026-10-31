@@ -50,7 +50,7 @@ format, `crates/tq/src/lib.rs` for the SDK, and
 - Live teleop through tq-probe with the real encoders.
 - Both consoles against `dev/run-local.sh` (2026-10-31): H.264 and H.265
   video, claim, WASD and 20 Hz streaming (acks ok, the robot counts the
-  commands), the stale-message trip, E-stop, release, and force-claim
+  commands), the stale-message trip, remote stop, release, and force-claim
   between the web console and tq-app in both directions.
 
 **Headless end-to-end check** (needs `../streaming-tools`): with
@@ -62,12 +62,15 @@ Expect:
 - every drive command acked `Ok`;
 - `deadman_tripped: false`.
 
-**E-stop (decided 2026-10-31):** an e-stop stops the robot under all
-circumstances. Both consoles' E-STOP (button and Space) send on every
-robot's `estop` channel until acked, and let go of their own drive lock.
+**Remote stop (decided 2026-10-31):** a remote stop stops the robot under all
+circumstances. Both consoles' STOP (button and Space) send on every
+robot's `stop` channel until acked, and let go of their own drive lock.
 The robot latches: it rejects drive commands until its drive lock is
 claimed again (Claim while holding re-claims). Release is the separate,
 non-stopping way to let go. See the Watchdog section of protocol-3.md.
+It is named a remote stop, not an E-stop: in the field an E-stop is a
+physical button on a separate, safety-rated link, which this does not
+replace.
 
 **Consoles today** drive only the first broadcast in a room that has a
 `drive` lock, and show only video tracks plus `.status` and `.events`.
@@ -86,7 +89,7 @@ apps, tq-probe). Teleop is the regression test.
 - Relay: rewrites broadcast indices between owner and room, routes channel
   datagrams by sender session, enforces locks and permissions, measures
   track stats itself, knows nothing about teleop. Many broadcasts per room.
-- `tq-teleop`: drive and e-stop channels, the dead-man as a lock watchdog,
+- `tq-teleop`: drive and remote stop channels, the dead-man as a lock watchdog,
   robot status on `.status`.
 - Data tracks: any session can publish them, with the same latency trace as
   video. Device state and events are `.status` and `.events` tracks.
@@ -178,7 +181,7 @@ path. Both apps render it.
 - **Catalog v1:** video (with latency HUD), latency per hop, number, plot,
   button, toggle, slider, keyboard/gamepad drive, lock control, event log,
   status, map.
-- **Teleop preset:** video grid, drive, lock control, e-stop, latency.
+- **Teleop preset:** video grid, drive, lock control, remote stop, latency.
 - **Order:** web first to settle the spec and the editor. Then tq-app renders
   the same spec with GPUI, keeping the rules that keep video fast (cached
   views, video surfaces redrawn on their own). After that, the editor comes

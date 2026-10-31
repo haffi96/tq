@@ -217,7 +217,7 @@ export interface TeleopStatus {
   holder: string | null;
   commands: number;
   last_seq: number;
-  estops: number;
+  stops: number;
 }
 
 export interface RobotStatus {

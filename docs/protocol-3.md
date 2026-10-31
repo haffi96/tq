@@ -118,7 +118,7 @@ whenever something changes. A session may advertise several broadcasts. A
   ],
   "channels": [
     { "id": "drive", "label": "Drive", "lock": "drive", "encoding": "json" },
-    { "id": "estop", "label": "E-stop", "encoding": "json" }
+    { "id": "stop", "label": "Stop", "encoding": "json" }
   ],
   "locks": [
     { "id": "drive", "label": "Drive",
@@ -384,13 +384,15 @@ It stays tripped until the next accepted message (the owner's app acks it
 broadcast's `.events` track. Teleop's dead-man switch is exactly this, on
 the `drive` lock (`crates/tq-teleop`).
 
-Teleop adds an e-stop on top (an application convention, not part of the
-wire): a message on the open `estop` channel stops the robot whoever
+Teleop adds a remote stop on top (an application convention, not part of the
+wire): a message on the open `stop` channel stops the robot whoever
 drives it, and latches. Drive commands are rejected until the drive lock
-is claimed again, at least 500 ms after the e-stop (a claim made around
-the same time may have raced it). Consoles send an e-stop again every
+is claimed again, at least 500 ms after the remote stop (a claim made around
+the same time may have raced it). Consoles send a remote stop again every
 50 ms until it is acked, since a datagram can be lost; the robot treats
-repeats within 500 ms as one press.
+repeats within 500 ms as one press. It is not an emergency stop: it goes
+over the network and through the relay, so a robot still needs a hardware
+E-stop on its own safety-rated link.
 
 ## Room state and events
 

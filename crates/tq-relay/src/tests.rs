@@ -163,7 +163,7 @@ fn rover(tracks: Vec<TrackInfo>) -> Advertisement {
                 schema: None,
             },
             ChannelInfo {
-                id: "estop".into(),
+                id: "stop".into(),
                 label: String::new(),
                 lock: None,
                 encoding: "json".into(),
@@ -408,15 +408,15 @@ async fn channels_locks_and_watchdog() {
 
     // An open channel: anyone with `write:` reaches the owner, who knows
     // who sent it; the ack goes back to the sender alone.
-    op1.channel(path("rover/estop")).send_json(&"stop").unwrap();
+    op1.channel(path("rover/stop")).send_json(&"stop").unwrap();
     let m = tokio::time::timeout(WAIT, inbox.recv()).await.unwrap().unwrap();
-    assert_eq!((m.channel.as_str(), m.from_sid, m.json::<String>().unwrap().as_str()), ("estop", op1.sid(), "stop"));
+    assert_eq!((m.channel.as_str(), m.from_sid, m.json::<String>().unwrap().as_str()), ("stop", op1.sid(), "stop"));
     m.accept();
     let Reply::Ack { channel, status, .. } = reply(&mut replies1).await else { panic!() };
-    assert_eq!((channel, status), (path("rover/estop"), AckStatus::Ok));
+    assert_eq!((channel, status), (path("rover/stop"), AckStatus::Ok));
 
     // No `write:`, or the channel's lock not held: dropped by the relay.
-    viewer.channel(path("rover/estop")).send_json(&"stop").unwrap();
+    viewer.channel(path("rover/stop")).send_json(&"stop").unwrap();
     op1.channel(path("rover/drive")).send_json(&1).unwrap();
     assert!(tokio::time::timeout(Duration::from_millis(300), inbox.recv()).await.is_err());
 
@@ -694,7 +694,7 @@ async fn ack_of(rx: &mut broadcast::Receiver<Reply>, channel: &Path, seq: u32) -
 }
 
 #[tokio::test]
-async fn estop_latches_until_the_drive_lock_is_claimed_again() {
+async fn remote_stop_latches_until_the_drive_lock_is_claimed_again() {
     let h = Harness::start().await;
     let robot = h.session("robot", Perms::robot("rover")).await;
     let mut ad = rover(vec![]);
@@ -714,7 +714,7 @@ async fn estop_latches_until_the_drive_lock_is_claimed_again() {
     for s in [&driver, &other] {
         until(s, |r| r.broadcast("rover").is_some()).await;
     }
-    let (drive_path, estop_path) = (path("rover/drive"), path("rover/estop"));
+    let (drive_path, stop_path) = (path("rover/drive"), path("rover/stop"));
     let mut replies = driver.replies();
     let drive = driver.channel(drive_path.clone());
     let cmd = serde_json::json!({ "command": "drive", "args": { "throttle": 0.5 } });
@@ -732,16 +732,16 @@ async fn estop_latches_until_the_drive_lock_is_claimed_again() {
     let seq = drive.send_json(&cmd).unwrap();
     assert_eq!(ack_of(&mut replies, &drive_path, seq).await.0, AckStatus::Ok);
 
-    // Someone else's e-stop stops the robot, and drive commands from the
+    // Someone else's remote stop stops the robot, and drive commands from the
     // holder are refused from then on.
     let mut other_replies = other.replies();
-    let seq = other.channel(estop_path.clone()).send_json(&serde_json::json!({})).unwrap();
-    assert_eq!(ack_of(&mut other_replies, &estop_path, seq).await.0, AckStatus::Ok);
-    assert!(motion.0.lock().unwrap().last().unwrap().starts_with("stop: e-stop"));
+    let seq = other.channel(stop_path.clone()).send_json(&serde_json::json!({})).unwrap();
+    assert_eq!(ack_of(&mut other_replies, &stop_path, seq).await.0, AckStatus::Ok);
+    assert!(motion.0.lock().unwrap().last().unwrap().starts_with("stop: remote stop"));
     let seq = drive.send_json(&cmd).unwrap();
     let (status, detail) = ack_of(&mut replies, &drive_path, seq).await;
     assert_eq!(status, AckStatus::Rejected);
-    assert!(detail.contains("e-stopped"), "{detail}");
+    assert!(detail.contains("stopped remotely"), "{detail}");
     // The holder's heartbeat echoes say so too.
     let mut wd = p.watchdog("drive").unwrap();
     assert!(wd.borrow_and_update().tripped);
@@ -756,7 +756,7 @@ async fn estop_latches_until_the_drive_lock_is_claimed_again() {
     .unwrap();
     assert!(tripped);
 
-    // A claim right after the e-stop may have raced it: still stopped.
+    // A claim right after the remote stop may have raced it: still stopped.
     held.release().await.unwrap();
     let held = hold(&driver).await;
     tokio::time::sleep(Duration::from_millis(100)).await;

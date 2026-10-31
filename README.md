@@ -44,7 +44,7 @@ where this is going is in [docs/roadmap.md](docs/roadmap.md).
 | `crates/tq-transport` | quinn / web-transport-quinn endpoints (BBR, bounded send window), certificates, the per-track group cache (`Track`) and datagram cache, the group sender with its drop policy, and the reader. |
 | `crates/tq-media` | Elementary stream handling: NAL framing (Annex B or 4-byte length-prefixed, auto-detected), access unit assembly, SEI capture timestamps, codec strings, parameter set repetition. No decoding. |
 | `crates/tq-relay` | Relay binary: one WebTransport endpoint for every session, HTTP for the web app, `/api/cert`, `/api/rooms` and dev tokens. Nothing teleop-specific. |
-| `crates/tq-teleop` | Teleop on the SDK: drive and e-stop channels, the dead-man as a lock watchdog, robot status. |
+| `crates/tq-teleop` | Teleop on the SDK: drive and remote stop channels, the dead-man as a lock watchdog, robot status. |
 | `crates/tq-publisher` | Robot-side binary: reads the TCP camera sources and publishes them, with teleop, as one broadcast. |
 | `crates/tq-tools` | `tq-impair` (Starlink-like UDP impairment proxy) and `tq-probe` (headless console: subscribes to every track and reports per-hop latency; can drive). |
 | `crates/tq-app` | Native console (GPUI; VideoToolbox on macOS, NVDEC on Linux). Not built by a plain `cargo build`. |
@@ -122,7 +122,10 @@ Then open:
 Operator controls:
 - **Claim** the robot's `drive` lock, then hold `W`/`A`/`S`/`D` to drive (commands at 20 Hz).
 - **stream 20 Hz** keeps commands flowing without a key held.
-- `Space` releases the lock, so the robot trips immediately. **E-stop** sends on the robot's `estop` channel.
+- **STOP** (or `Space`) remote-stops every robot in the room, whoever
+  drives it, and lets go of your own lock. A stopped robot refuses drive
+  commands until its lock is claimed again (**Claim** while holding
+  re-claims). **Release** lets go without stopping anything else.
 
 ### Native app (macOS, Linux)
 
@@ -314,7 +317,7 @@ is not sent at all.
 ### Teleop and the dead-man switch
 
 Teleop is built from general parts (`crates/tq-teleop`): the robot's
-broadcast has a `drive` channel behind a `drive` lock, an open `estop`
+broadcast has a `drive` channel behind a `drive` lock, an open `stop`
 channel, and `.status` / `.events` data tracks. The relay only lets the
 lock's holder send on `drive` or heartbeat the lock. Commands are
 latest-wins by `seq`. The lock's watchdog, run by the robot, keeps it
@@ -326,6 +329,17 @@ safe-stopped (tripped) whenever any of these is true:
 
 It stays tripped until the next accepted command. `LoggingSink` stands in
 for the robot interface (`tq_teleop::Sink`).
+
+A message on `stop` (a **remote stop**) safe-stops the robot whoever
+drives it, and latches: drive commands are rejected until the drive lock
+is claimed again, at least 500 ms later.
+
+**Not an emergency stop.** The remote stop travels over the network,
+through the relay, as a datagram that consoles resend until acked. It
+cannot be relied on the way a hardware E-stop can: a physical button
+wired into a safety-rated circuit, or on its own dedicated radio link.
+Real robots need one of those as well; the remote stop is the operator's
+fast, convenient way to halt a robot from the console.
 
 ## Measuring
 

@@ -33,12 +33,12 @@ const CLOCK_WAIT: Duration = Duration::from_secs(1);
 /// The lock (and the channel behind it) an operator drives with.
 pub const DRIVE: &str = "drive";
 /// The channel that stops a robot, whoever drives it.
-pub const ESTOP: &str = "estop";
-/// E-stops go as datagrams, which can be lost: each is sent again this
+pub const STOP: &str = "stop";
+/// Remote stops go as datagrams, which can be lost: each is sent again this
 /// often until the robot acks one (it treats repeats as one press)...
-const ESTOP_RETRY: Duration = Duration::from_millis(50);
+const STOP_RETRY: Duration = Duration::from_millis(50);
 /// ...for this long.
-const ESTOP_GIVE_UP: Duration = Duration::from_secs(2);
+const STOP_GIVE_UP: Duration = Duration::from_secs(2);
 /// A broadcast's latest status (JSON; teleop's state under `teleop`).
 pub const STATUS: &str = ".status";
 /// A broadcast's own event log (JSON stream).
@@ -203,7 +203,7 @@ impl Shared {
 
     /// Claims the drive lock (taking it from its holder with `force`) and
     /// heartbeats it while held. Claiming it while holding it claims it
-    /// anew, which re-arms a robot after an e-stop.
+    /// anew, which re-arms a robot after a remote stop.
     pub fn claim(self: &Arc<Self>, force: bool) {
         let Some((session, lock)) = self.drive_target() else {
             return;
@@ -244,24 +244,24 @@ impl Shared {
         });
     }
 
-    /// E-stop: every robot in the room safe-stops, whoever drives it, and
+    /// Remote stop: every robot in the room safe-stops, whoever drives it, and
     /// stays stopped until its drive lock is claimed again. This app lets
     /// go of its own drive lock too.
-    pub fn estop(self: &Arc<Self>) {
+    pub fn remote_stop(self: &Arc<Self>) {
         let targets: Vec<Path> = self
             .client
             .room()
             .borrow()
             .broadcasts
             .iter()
-            .filter(|b| b.channel(ESTOP).is_some())
-            .map(|b| Path::new(&b.name, ESTOP))
+            .filter(|b| b.channel(STOP).is_some())
+            .map(|b| Path::new(&b.name, STOP))
             .collect();
         if targets.is_empty() {
-            self.event(Event::Log("E-STOP: no broadcast with an estop channel".into()));
+            self.event(Event::Log("STOP: no broadcast with a stop channel".into()));
         }
         for channel in targets {
-            self.rt.spawn(send_estop(self.clone(), channel));
+            self.rt.spawn(send_remote_stop(self.clone(), channel));
         }
         if let Some(hold) = self.hold.lock().unwrap().take() {
             self.rt.spawn(async move {
@@ -567,18 +567,18 @@ async fn read_replies(shared: Arc<Shared>, mut rx: broadcast::Receiver<Reply>) {
     }
 }
 
-/// Sends an e-stop until the robot acks it, on whichever session is up.
-async fn send_estop(shared: Arc<Shared>, channel: Path) {
+/// Sends a remote stop until the robot acks it, on whichever session is up.
+async fn send_remote_stop(shared: Arc<Shared>, channel: Path) {
     let mut replies = shared.client.replies();
     let body = serde_json::json!({ "reason": "console" });
     let mut sent = HashSet::new();
-    let give_up = Instant::now() + ESTOP_GIVE_UP;
-    let mut tick = tokio::time::interval(ESTOP_RETRY);
+    let give_up = Instant::now() + STOP_GIVE_UP;
+    let mut tick = tokio::time::interval(STOP_RETRY);
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 if Instant::now() >= give_up {
-                    shared.event(Event::Log(format!("E-STOP {channel}: NO ANSWER from the robot in 2 s")));
+                    shared.event(Event::Log(format!("STOP {channel}: NO ANSWER from the robot in 2 s")));
                     return;
                 }
                 if let Some(s) = shared.session() {
@@ -594,8 +594,8 @@ async fn send_estop(shared: Arc<Shared>, channel: Path) {
                         continue;
                     }
                     let line = match status {
-                        tq_wire::AckStatus::Ok => format!("E-STOP {channel}: robot stopped"),
-                        other => format!("E-STOP {channel}: robot answered {other:?} {detail}"),
+                        tq_wire::AckStatus::Ok => format!("STOP {channel}: robot stopped"),
+                        other => format!("STOP {channel}: robot answered {other:?} {detail}"),
                     };
                     shared.event(Event::Log(line));
                     return;

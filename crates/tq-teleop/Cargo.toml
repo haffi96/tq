@@ -1,6 +1,6 @@
 [package]
 name = "tq-teleop"
-description = "Teleoperation on tq: drive commands on a locked channel, the dead-man watchdog, e-stop, robot status"
+description = "Teleoperation on tq: drive commands on a locked channel, the dead-man watchdog, remote stop, robot status"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

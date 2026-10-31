@@ -36,7 +36,7 @@ const sensorMs = Number(params.get('sensor_ms') ?? 0) || 0;
 
 /** The teleop lock and channels (crates/tq-teleop). */
 const DRIVE = 'drive';
-const ESTOP = 'estop';
+const STOP = 'stop';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) => {
@@ -407,17 +407,17 @@ function lockMsg(type: 'claim' | 'release', force = false) {
   send({ type: 'control', msg: type === 'claim' ? { type, lock, force } : { type, lock } });
 }
 
-// E-stop: every robot in the room safe-stops, whoever drives it, and stays
+// Remote stop: every robot in the room safe-stops, whoever drives it, and stays
 // stopped until its drive lock is claimed again. This console stops
 // sending and lets go of its own lock too.
-function estop() {
+function remoteStop() {
   keys.clear();
   streaming = false;
   $<HTMLInputElement>('stream').checked = false;
-  const targets = state?.broadcasts.filter((b) => b.channels.some((c) => c.info.id === ESTOP)) ?? [];
-  if (!targets.length) log('E-STOP: no broadcast with an estop channel (not connected?)');
+  const targets = state?.broadcasts.filter((b) => b.channels.some((c) => c.info.id === STOP)) ?? [];
+  if (!targets.length) log('STOP: no broadcast with a stop channel (not connected?)');
   for (const b of targets) {
-    send({ type: 'estop', channel: path(b.name, ESTOP), body: { reason: 'console' } });
+    send({ type: 'stop', channel: path(b.name, STOP), body: { reason: 'console' } });
   }
   const mine = driveTarget()?.locks.find((l) => l.info.id === DRIVE)?.holder === session;
   if (mine && session) lockMsg('release');
@@ -426,7 +426,7 @@ function estop() {
 function setupOperator() {
   $('operator').hidden = false;
   // Claiming while holding claims anew: that re-arms a robot after an
-  // e-stop.
+  // remote stop.
   $('claim').onclick = () => {
     if (driveTarget()?.locks.find((l) => l.info.id === DRIVE)?.holder === session && session) lockMsg('release');
     lockMsg('claim');
@@ -434,7 +434,7 @@ function setupOperator() {
   $('force').onclick = () => lockMsg('claim', true);
   $('release').onclick = () => lockMsg('release');
   $('once').onclick = sendDrive;
-  $('estop').onclick = estop;
+  $('stop').onclick = remoteStop;
   const stream = $<HTMLInputElement>('stream');
   stream.onchange = () => (streaming = stream.checked);
   window.addEventListener('keydown', (e) => {
@@ -445,7 +445,7 @@ function setupOperator() {
     }
   });
   window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
-  // Space is E-STOP, before anything else sees it (capture phase): a
+  // Space is STOP, before anything else sees it (capture phase): a
   // focused button or checkbox would otherwise take it as a click too (a
   // focused Claim would re-claim, the stream box would stream again).
   window.addEventListener(
@@ -454,7 +454,7 @@ function setupOperator() {
       if (e.key !== ' ') return;
       e.preventDefault();
       e.stopPropagation();
-      if (!e.repeat) estop();
+      if (!e.repeat) remoteStop();
     },
     true,
   );
@@ -494,11 +494,11 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
     case 'data':
       onData(msg.track, msg.value, msg.atUs);
       break;
-    case 'estop':
+    case 'stop':
       log(
         msg.acked
-          ? `E-STOP ${msg.channel}: robot ${msg.status === 'ok' ? 'stopped' : `answered ${msg.status} ${msg.detail ?? ''}`}`
-          : `E-STOP ${msg.channel}: NO ANSWER from the robot in 2 s`,
+          ? `STOP ${msg.channel}: robot ${msg.status === 'ok' ? 'stopped' : `answered ${msg.status} ${msg.detail ?? ''}`}`
+          : `STOP ${msg.channel}: NO ANSWER from the robot in 2 s`,
       );
       break;
     case 'stats': {
@@ -515,7 +515,7 @@ worker.onmessage = (e: MessageEvent<FromWorker>) => {
             .join(' ') || '–'}${t.lastAckDetail ? `   last: ${t.lastAckDetail}` : ''}`,
           `robot (via heartbeat echo): ${t.tripped === null ? '–' : t.tripped ? 'tripped' : 'armed'}`,
           status
-            ? `robot (via .status): commands ${status.commands}  last seq ${status.last_seq}  e-stops ${status.estops}`
+            ? `robot (via .status): commands ${status.commands}  last seq ${status.last_seq}  remote stops ${status.stops}`
             : 'robot (via .status): –',
         ].join('\n');
       }

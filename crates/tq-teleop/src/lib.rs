@@ -4,14 +4,18 @@
 //!   time, with a watchdog on the lock: the dead-man switch. The robot is
 //!   safe-stopped unless the lock's holder is alive and sending (see
 //!   [`tq::WatchdogStatus`]);
-//! - an `estop` channel anyone allowed to write may use, whoever drives.
-//!   An e-stop latches: the robot safe-stops and refuses drive commands
+//! - a `stop` channel anyone allowed to write may use, whoever drives.
+//!   A remote stop latches: the robot safe-stops and refuses drive commands
 //!   until the drive lock is claimed again (at least [`REARM_AFTER`] after
-//!   the e-stop, so a claim racing it cannot cancel it);
+//!   the remote stop, so a claim racing it cannot cancel it);
 //! - `.status` and `.events` data tracks the consoles show.
 //!
+//! The remote stop is not an emergency stop: it goes over the network and
+//! through the relay. A robot needs a hardware E-stop (a safety-rated
+//! circuit, or its own dedicated radio link) as well.
+//!
 //! The robot side adds these to its broadcast with [`advertise`], then
-//! hands drive and e-stop messages to a [`Teleop`], which applies them to a
+//! hands drive and remote stop messages to a [`Teleop`], which applies them to a
 //! [`Sink`] (the robot's motion interface, which is not part of this repo).
 //!
 //! Drive messages are JSON: `{"command": "drive", "args": {"throttle":
@@ -35,10 +39,10 @@ use tq::{
 
 /// The drive channel, and the lock that guards it.
 pub const DRIVE: &str = "drive";
-pub const ESTOP: &str = "estop";
+pub const STOP: &str = "stop";
 
-/// A claim of the drive lock re-arms an e-stop only this long after it.
-/// The claim and the e-stop reach the robot on different streams, in
+/// A claim of the drive lock re-arms a remote stop only this long after it.
+/// The claim and the remote stop reach the robot on different streams, in
 /// either order; a claim made around the same time must not undo it.
 pub const REARM_AFTER: Duration = Duration::from_millis(500);
 
@@ -70,7 +74,7 @@ pub fn advertise(ad: &mut Advertisement, cfg: &Config) {
         schema: None,
     };
     ad.channels.push(channel(DRIVE, "Drive", Some(DRIVE)));
-    ad.channels.push(channel(ESTOP, "E-stop", None));
+    ad.channels.push(channel(STOP, "Stop", None));
     ad.locks.push(LockInfo {
         id: DRIVE.into(),
         label: "Drive".into(),
@@ -141,17 +145,17 @@ pub struct Status {
     pub holder: Option<String>,
     pub commands: u64,
     pub last_seq: u32,
-    pub estops: u64,
+    pub stops: u64,
 }
 
 pub struct Teleop {
     p: Arc<Publication>,
     sink: Arc<dyn Sink>,
     commands: AtomicU64,
-    estops: AtomicU64,
+    stops: AtomicU64,
     last_seq: Mutex<u32>,
-    /// The latched e-stop: why, and when.
-    estop: Mutex<Option<(String, Instant)>>,
+    /// The latched remote stop: why, and when.
+    stop_latch: Mutex<Option<(String, Instant)>>,
     /// The drive lock's watchdog, as last seen.
     watchdog: Mutex<tq::WatchdogStatus>,
     status: watch::Sender<Status>,
@@ -169,9 +173,9 @@ impl Teleop {
             p: p.clone(),
             sink,
             commands: AtomicU64::new(0),
-            estops: AtomicU64::new(0),
+            stops: AtomicU64::new(0),
             last_seq: Mutex::new(0),
-            estop: Mutex::new(None),
+            stop_latch: Mutex::new(None),
             watchdog: Mutex::default(),
             status: watch::channel(Status {
                 tripped: true,
@@ -189,13 +193,13 @@ impl Teleop {
         self.status.subscribe()
     }
 
-    /// Handles a drive or e-stop message; any other message is handed
+    /// Handles a drive or remote stop message; any other message is handed
     /// back.
     pub fn handle(&self, msg: Message) -> Option<Message> {
         match msg.channel.as_str() {
             DRIVE => {
-                if self.estop.lock().unwrap().is_some() {
-                    msg.reject("e-stopped: claim the drive lock again to re-arm");
+                if self.stop_latch.lock().unwrap().is_some() {
+                    msg.reject("stopped remotely: claim the drive lock again to re-arm");
                     return None;
                 }
                 let cmd: Command = match msg.json() {
@@ -216,15 +220,15 @@ impl Teleop {
                 self.refresh();
                 None
             }
-            ESTOP => {
-                let reason = format!("e-stop from session {}", msg.from_sid);
+            STOP => {
+                let reason = format!("remote stop from session {}", msg.from_sid);
                 // Stop first; everything else is bookkeeping.
                 self.sink.safe_stop(&reason);
                 let reason_for_watchdog = reason.clone();
-                // Consoles repeat an e-stop until it is acked: a repeat
+                // Consoles repeat a remote stop until it is acked: a repeat
                 // within REARM_AFTER is the same press.
                 let repeat = {
-                    let mut e = self.estop.lock().unwrap();
+                    let mut e = self.stop_latch.lock().unwrap();
                     let repeat = e.as_ref().is_some_and(|(_, at)| at.elapsed() < REARM_AFTER);
                     *e = Some((reason, Instant::now()));
                     repeat
@@ -233,9 +237,9 @@ impl Teleop {
                 // Holders see it in their heartbeat echoes too.
                 self.p.trip(DRIVE, &reason_for_watchdog);
                 if !repeat {
-                    self.estops.fetch_add(1, Relaxed);
+                    self.stops.fetch_add(1, Relaxed);
                     if let Some(events) = self.p.data(".events") {
-                        events.send_json(&serde_json::json!({ "type": "estop", "from_sid": msg.from_sid }));
+                        events.send_json(&serde_json::json!({ "type": "remote_stop", "from_sid": msg.from_sid }));
                     }
                 }
                 self.publish();
@@ -248,42 +252,42 @@ impl Teleop {
     fn refresh(&self) {
         self.status.send_modify(|s| {
             s.commands = self.commands.load(Relaxed);
-            s.estops = self.estops.load(Relaxed);
+            s.stops = self.stops.load(Relaxed);
             s.last_seq = *self.last_seq.lock().unwrap();
         });
     }
 
-    /// The status from the watchdog and the e-stop latch: stopped if
+    /// The status from the watchdog and the remote stop latch: stopped if
     /// either says so.
     fn publish(&self) {
         let w = self.watchdog.lock().unwrap().clone();
-        let estop = self.estop.lock().unwrap().as_ref().map(|(r, _)| r.clone());
+        let stop_latch = self.stop_latch.lock().unwrap().as_ref().map(|(r, _)| r.clone());
         self.status.send_modify(|s| {
-            (s.tripped, s.reason) = match estop {
+            (s.tripped, s.reason) = match stop_latch {
                 Some(r) => (true, r),
                 None => (w.tripped, w.reason),
             };
             s.commands = self.commands.load(Relaxed);
-            s.estops = self.estops.load(Relaxed);
+            s.stops = self.stops.load(Relaxed);
             s.last_seq = *self.last_seq.lock().unwrap();
         });
     }
 
-    /// A claim of the drive lock re-arms a latched e-stop, unless it may
+    /// A claim of the drive lock re-arms a latched remote stop, unless it may
     /// have raced it.
     fn claimed(&self, holder: &str) {
-        let mut e = self.estop.lock().unwrap();
+        let mut e = self.stop_latch.lock().unwrap();
         if e.as_ref().is_some_and(|(_, at)| at.elapsed() >= REARM_AFTER) {
             *e = None;
             drop(e);
             if let Some(events) = self.p.data(".events") {
-                events.send_json(&serde_json::json!({ "type": "estop_cleared", "holder": holder }));
+                events.send_json(&serde_json::json!({ "type": "remote_stop_cleared", "holder": holder }));
             }
         }
     }
 }
 
-/// Re-arms a latched e-stop on each new claim of the drive lock.
+/// Re-arms a latched remote stop on each new claim of the drive lock.
 async fn rearm(t: std::sync::Weak<Teleop>, mut claims: tokio::sync::broadcast::Receiver<(String, tq::Holder)>) {
     use tokio::sync::broadcast::error::RecvError;
     loop {

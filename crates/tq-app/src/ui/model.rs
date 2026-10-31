@@ -453,12 +453,12 @@ impl Model {
     /// Emergency stop: every robot in the room safe-stops, whoever drives
     /// it, until its drive lock is claimed again. Stops sending, and lets
     /// go of this app's own drive lock.
-    pub fn estop(&mut self, cx: &mut Context<Self>) {
+    pub fn remote_stop(&mut self, cx: &mut Context<Self>) {
         self.keys.clear();
         self.streaming = false;
         self.update_drive(cx);
-        self.shared.estop();
-        self.push_log("E-STOP sent".into());
+        self.shared.remote_stop();
+        self.push_log("Remote stop sent".into());
     }
 }
 

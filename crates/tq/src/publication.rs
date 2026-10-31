@@ -347,7 +347,7 @@ impl Publication {
         }
     }
 
-    /// Trips a lock's watchdog from the app (an e-stop, say). It clears
+    /// Trips a lock's watchdog from the app (a remote stop, say). It clears
     /// like any trip: on the holder's next accepted message.
     pub fn trip(&self, lock: &str, reason: &str) {
         if let Some((state, tx)) = self.watchdogs.get(lock) {

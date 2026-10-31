@@ -90,7 +90,7 @@ impl State {
         self.trip(if sid.is_some() { "new holder" } else { "no holder" })
     }
 
-    /// The owner's app trips it (an e-stop, say).
+    /// The owner's app trips it (a remote stop, say).
     pub fn trip_by_app(&mut self, reason: &str) -> Option<Edge> {
         self.trip(reason)
     }

@@ -212,7 +212,7 @@ mod tests {
         assert!(p.allows(Verb::Sub, &path("other/.status")));
         assert!(!p.allows(Verb::Sub, &path("other/front")));
         assert!(p.allows(Verb::Write, &path("rover-7/drive")));
-        assert!(!p.allows(Verb::Write, &path("rover-7/estop")));
+        assert!(!p.allows(Verb::Write, &path("rover-7/stop")));
         assert!(!p.allows(Verb::Lock, &path("rover-7/drive")));
         assert!(p.allows_pub("alice") && !p.allows_pub("bob") && p.can_publish());
         assert!(Perms::robot("*").allows_pub("anything"));

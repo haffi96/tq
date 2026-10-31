@@ -115,7 +115,7 @@ impl AppView {
         view
     }
 
-    /// Space is E-STOP, before anything else sees it: a focused button or
+    /// Space is STOP, before anything else sees it: a focused button or
     /// switch would otherwise take it as a click too (a focused Claim
     /// would re-claim, a focused Stream switch would stream again).
     fn on_capture_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -125,7 +125,7 @@ impl AppView {
         window.prevent_default();
         cx.stop_propagation();
         if !e.is_held {
-            self.model.update(cx, |m, cx| m.estop(cx));
+            self.model.update(cx, |m, cx| m.remote_stop(cx));
         }
     }
 

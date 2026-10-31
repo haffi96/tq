@@ -344,12 +344,12 @@ impl Sidebar {
                     })),
             )
             .child(
-                Button::new("estop")
+                Button::new("remote-stop")
                     .danger()
                     .w_full()
                     .icon(gpui_kit::assets::IconName::OctagonX)
-                    .label("E-STOP  ·  Space")
-                    .on_click(move |_, _, cx| model.update(cx, |m, cx| m.estop(cx))),
+                    .label("STOP  ·  Space")
+                    .on_click(move |_, _, cx| model.update(cx, |m, cx| m.remote_stop(cx))),
             )
             .child(
                 v_flex()

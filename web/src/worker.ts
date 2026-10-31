@@ -46,8 +46,8 @@ export type ToWorker =
   | { type: 'control'; msg: Control }
   /** One JSON message on a channel (`<broadcast>/<channel>`). */
   | { type: 'message'; channel: Path; body: unknown }
-  /** An e-stop: sent again every ESTOP_RETRY_MS until acked. */
-  | { type: 'estop'; channel: Path; body: unknown };
+  /** A remote stop: sent again every STOP_RETRY_MS until acked. */
+  | { type: 'stop'; channel: Path; body: unknown };
 
 export interface Window {
   avg: number | null;
@@ -86,8 +86,8 @@ export type FromWorker =
   | { type: 'status'; state: 'connecting' | 'connected' | 'closed'; detail?: string }
   | { type: 'control'; msg: Control }
   | { type: 'room'; msg: RoomMessage }
-  /** How an e-stop went: acked by the robot, or not within ESTOP_GIVE_UP_MS. */
-  | { type: 'estop'; channel: Path; acked: boolean; status?: string; detail?: string }
+  /** How a remote stop went: acked by the robot, or not within STOP_GIVE_UP_MS. */
+  | { type: 'stop'; channel: Path; acked: boolean; status?: string; detail?: string }
   /** One message of a subscribed JSON data track, and its capture time
    *  on this machine's clock (Unix µs; arrival time when unknown). */
   | { type: 'data'; track: Path; value: unknown; atUs: number }
@@ -727,7 +727,7 @@ async function readDatagrams(t: WebTransport) {
     }
     const rtt = (nowUs() - d.echoUs) / 1000;
     if (d.type === 'ack') {
-      estopAcked(d.broadcast, d.channel, d.seq, d.status, d.detail);
+      stopAcked(d.broadcast, d.channel, d.seq, d.status, d.detail);
       teleop.ackRtt.add(rtt);
       teleop.acks[d.status] = (teleop.acks[d.status] ?? 0) + 1;
       if (d.detail) teleop.lastAckDetail = d.detail;
@@ -752,41 +752,41 @@ function sendMessage(channel: Path, body: unknown): number | null {
   return seq;
 }
 
-// E-stops go as datagrams, which can be lost: each is sent again until the
+// Remote stops go as datagrams, which can be lost: each is sent again until the
 // robot acks one of its copies (the robot treats repeats as one press).
-const ESTOP_RETRY_MS = 50;
-const ESTOP_GIVE_UP_MS = 2000;
-const estops = new Map<Path, { seqs: Set<number>; timer: ReturnType<typeof setInterval> }>();
+const STOP_RETRY_MS = 50;
+const STOP_GIVE_UP_MS = 2000;
+const stops = new Map<Path, { seqs: Set<number>; timer: ReturnType<typeof setInterval> }>();
 
-function sendEstop(channel: Path, body: unknown) {
-  const previous = estops.get(channel);
+function sendStop(channel: Path, body: unknown) {
+  const previous = stops.get(channel);
   if (previous) clearInterval(previous.timer);
   const seqs = new Set<number>();
-  const giveUp = performance.now() + ESTOP_GIVE_UP_MS;
+  const giveUp = performance.now() + STOP_GIVE_UP_MS;
   const attempt = () => {
     const seq = sendMessage(channel, body);
     if (seq !== null) seqs.add(seq);
     if (performance.now() >= giveUp) {
       clearInterval(entry.timer);
-      estops.delete(channel);
-      post({ type: 'estop', channel, acked: false });
+      stops.delete(channel);
+      post({ type: 'stop', channel, acked: false });
     }
   };
-  const entry = { seqs, timer: setInterval(attempt, ESTOP_RETRY_MS) };
-  estops.set(channel, entry);
+  const entry = { seqs, timer: setInterval(attempt, STOP_RETRY_MS) };
+  stops.set(channel, entry);
   attempt();
 }
 
-function estopAcked(broadcast: number, channel: number, seq: number, status: string, detail: string) {
+function stopAcked(broadcast: number, channel: number, seq: number, status: string, detail: string) {
   const b = broadcastAt(broadcast);
   const c = b?.channels.find((x) => x.index === channel);
   if (!b || !c) return;
   const p = path(b.name, c.info.id);
-  const entry = estops.get(p);
+  const entry = stops.get(p);
   if (!entry?.seqs.has(seq)) return;
   clearInterval(entry.timer);
-  estops.delete(p);
-  post({ type: 'estop', channel: p, acked: true, status, detail });
+  stops.delete(p);
+  post({ type: 'stop', channel: p, acked: true, status, detail });
 }
 
 function sendHeartbeats() {
@@ -897,8 +897,8 @@ scope.onmessage = (e) => {
     case 'message':
       sendMessage(msg.channel, msg.body);
       break;
-    case 'estop':
-      sendEstop(msg.channel, msg.body);
+    case 'stop':
+      sendStop(msg.channel, msg.body);
       break;
   }
 };
