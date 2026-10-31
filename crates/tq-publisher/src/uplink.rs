@@ -3,10 +3,10 @@
 
 use std::{
     sync::{atomic::Ordering::Relaxed, Arc},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use tq::{Inbox, Publication, PublishOptions, ServerTrust, Session};
+use tq::{Client, Conn, Inbox, Publication, PublishOptions, ServerTrust};
 use tq_teleop::Teleop;
 use tq_wire::{now_us, sign_token, BuildInfo, Claims, Perms};
 
@@ -22,20 +22,32 @@ pub struct Uplink {
 }
 
 impl Uplink {
-    /// Connects to the relay and keeps reconnecting with backoff.
-    pub async fn run(&self) {
-        let mut backoff = Duration::from_millis(250);
+    /// Connects to the relay, publishes, and does both again after every
+    /// drop, until the process ends.
+    pub async fn run(self) {
+        let opts = PublishOptions {
+            max_lag: Duration::from_millis(self.cfg.max_lag_ms),
+        };
+        let publication = self.publication.clone();
+        let this = Arc::new(self);
+        let client = Client::new({
+            let this = this.clone();
+            move || {
+                let this = this.clone();
+                async move { this.options().await }
+            }
+        });
+        client.publish(&publication, opts);
+        let mut conn = client.conn();
         loop {
-            let started = Instant::now();
-            match self.session().await {
-                Ok(why) => tracing::warn!(%why, "relay session ended"),
-                Err(e) => tracing::warn!(error = format!("{e:#}"), "relay session failed"),
+            match &*conn.borrow_and_update() {
+                Conn::Connecting => tracing::info!(relay = %this.cfg.relay_url, "connecting"),
+                Conn::Connected(s) => tracing::info!(relay = %s.relay().long(), "connected to relay"),
+                Conn::Down { reason, retry_in, .. } => tracing::warn!(%reason, ?retry_in, "relay session down"),
             }
-            if started.elapsed() > Duration::from_secs(10) {
-                backoff = Duration::from_millis(250);
+            if conn.changed().await.is_err() {
+                return;
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     }
 
@@ -61,10 +73,9 @@ impl Uplink {
         })
     }
 
-    /// One session: returns why it ended.
-    async fn session(&self) -> anyhow::Result<String> {
-        tracing::info!(relay = %self.cfg.relay_url, "connecting");
-        let session = Session::connect(tq::Options {
+    /// For each attempt: a fresh token, and the trust fetched again.
+    async fn options(&self) -> anyhow::Result<tq::Options> {
+        Ok(tq::Options {
             relay_url: self.cfg.relay_url.parse()?,
             room: self.cfg.room_id.clone(),
             token: self.token(),
@@ -72,16 +83,6 @@ impl Uplink {
             quic: self.cfg.quic.clone(),
             build: self.build.clone(),
         })
-        .await?;
-        tracing::info!(relay = %session.relay().long(), "connected to relay");
-        let opts = PublishOptions {
-            max_lag: Duration::from_millis(self.cfg.max_lag_ms),
-        };
-        if let Err(e) = session.publish_with(&self.publication, opts).await {
-            session.close();
-            return Err(e);
-        }
-        Ok(session.closed().await)
     }
 }
 

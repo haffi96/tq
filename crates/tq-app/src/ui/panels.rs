@@ -19,7 +19,7 @@ use gpui_kit::{
 use tq_wire::{BuildInfo, Compat};
 
 use super::{
-    model::{kind_of, Model, UpdateState},
+    model::{kind_of, time_of_day, Model, UpdateState},
     widgets::*,
 };
 use crate::session::ConnState;
@@ -598,7 +598,7 @@ impl Render for Events {
         if m.log.is_empty() {
             log = log.child(div().text_xs().text_color(t.muted_foreground).child("Nothing yet"));
         }
-        for (time, line) in &m.log {
+        for (at_us, line) in &m.log {
             log = log.child(
                 h_flex()
                     .gap_3()
@@ -607,7 +607,7 @@ impl Render for Events {
                         div()
                             .font_family(t.mono_font_family.clone())
                             .text_color(t.muted_foreground)
-                            .child(time.clone()),
+                            .child(time_of_day(*at_us)),
                     )
                     .child(line.clone()),
             );

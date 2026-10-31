@@ -17,10 +17,8 @@ use std::{
 use anyhow::Context;
 use futures::channel::mpsc::UnboundedSender;
 use tokio::sync::broadcast::{self, error::RecvError};
-use tq::{Reply, ServerTrust, Session};
-use tq_wire::{
-    now_us, BroadcastState, BuildInfo, Compat, Control, Offset, Path, Perms, RoomEvent, RoomState, TrackInfo, TrackKind,
-};
+use tq::{Client, Conn, Hold, Reply, Session, Token};
+use tq_wire::{BroadcastState, BuildInfo, Control, Path, Perms, RoomEvent, RoomState, TrackInfo, TrackKind};
 
 use crate::{
     feed::{Feed, Job},
@@ -29,11 +27,8 @@ use crate::{
 
 const HEARTBEAT: Duration = Duration::from_millis(100);
 const TELEOP: Duration = Duration::from_millis(50);
-const RECONNECT: Duration = Duration::from_secs(1);
-/// After a relay with another protocol major: it will not change soon.
-const RECONNECT_REFUSED: Duration = Duration::from_secs(10);
-/// A failed subscription is tried again after this long.
-const RESUBSCRIBE: Duration = Duration::from_secs(1);
+/// How long a replayed `.events` message waits for the clock offsets.
+const CLOCK_WAIT: Duration = Duration::from_secs(1);
 
 /// The lock (and the channel behind it) an operator drives with.
 pub const DRIVE: &str = "drive";
@@ -94,6 +89,9 @@ pub enum Event {
     BroadcastStatus(String, serde_json::Value),
     /// A line for the events log.
     Log(String),
+    /// A line for the events log that happened at a given time (Unix µs,
+    /// this machine's clock).
+    LogAt(u64, String),
     /// A feed got a new picture (coalesced: at most one pending).
     Frame,
 }
@@ -124,8 +122,9 @@ pub struct Shared {
     /// One feed per video track, in the order they appeared. Kept across
     /// reconnects so the UI tiles stay put.
     pub feeds: Mutex<Vec<Arc<Feed>>>,
-    /// The connected session, if any.
-    session: Mutex<Option<Session>>,
+    client: Client,
+    /// The drive lock, while this app holds it.
+    hold: Mutex<Option<Hold>>,
     rt: tokio::runtime::Handle,
     events: UnboundedSender<Event>,
     frame_pending: AtomicBool,
@@ -165,20 +164,12 @@ impl Shared {
     }
 
     pub fn session(&self) -> Option<Session> {
-        self.session.lock().unwrap().clone()
+        self.client.session()
     }
 
     pub fn request_keyframe(&self, track: &Path, reason: &str) {
         if let Some(s) = self.session() {
             s.request_keyframe(track, reason);
-        }
-    }
-
-    /// Relay clock and `broadcast`'s owner clock, each minus this machine's.
-    pub fn offsets(&self, broadcast: &str) -> (Option<Offset>, Option<Offset>) {
-        match self.session() {
-            Some(s) => (s.relay_offset(), s.owner_offset(broadcast)),
-            None => (None, None),
         }
     }
 
@@ -203,21 +194,25 @@ impl Shared {
             .max_by(f64::total_cmp)
     }
 
-    /// Claims the drive lock (taking it from its holder with `force`).
+    /// Claims the drive lock (taking it from its holder with `force`) and
+    /// heartbeats it while held.
     pub fn claim(self: &Arc<Self>, force: bool) {
         let Some((session, lock)) = self.drive_target() else {
             return;
         };
+        let held = self.hold.lock().unwrap().as_ref().is_some_and(|h| h.is_held() && *h.lock() == lock);
+        if held {
+            self.event(Event::Log(format!("Already driving {}", lock.broadcast)));
+            return;
+        }
         let shared = self.clone();
         self.rt.spawn(async move {
-            let line = match session.claim(lock.clone(), force).await {
-                Ok(Ok(())) => {
-                    // Right away: the room's state names the holder a
-                    // little later, and the watchdog is already counting.
-                    let _ = session.heartbeat(&lock);
+            let line = match session.hold(lock.clone(), force, HEARTBEAT).await {
+                Ok(Ok(hold)) => {
+                    *shared.hold.lock().unwrap() = Some(hold);
                     format!("Claim granted: you are driving {}", lock.broadcast)
                 }
-                Ok(Err((_, reason))) => format!("Claim refused: {reason}"),
+                Ok(Err(refused)) => format!("Claim refused: {}", refused.reason),
                 Err(e) => format!("Claim failed: {e:#}"),
             };
             shared.event(Event::Log(line));
@@ -229,9 +224,14 @@ impl Shared {
         let Some((session, lock)) = self.drive_target() else {
             return;
         };
+        let hold = self.hold.lock().unwrap().take();
         let shared = self.clone();
         self.rt.spawn(async move {
-            if let Err(e) = session.release(lock).await {
+            let r = match hold {
+                Some(h) if h.is_held() => h.release().await,
+                _ => session.release(lock).await,
+            };
+            if let Err(e) = r {
                 shared.event(Event::Log(format!("Release failed: {e:#}")));
             }
         });
@@ -282,150 +282,87 @@ impl Shared {
 
 /// Starts the session on `rt`. Events for the UI arrive on `events`.
 pub fn start(rt: &tokio::runtime::Runtime, config: Config, events: UnboundedSender<Event>) -> Arc<Shared> {
+    let _guard = rt.enter();
+    let client = Client::new({
+        let config = config.clone();
+        move || options(config.clone())
+    });
     let shared = Arc::new(Shared {
         config,
         teleop: Mutex::default(),
         drive: Mutex::default(),
         feeds: Mutex::default(),
-        session: Mutex::default(),
+        client: client.clone(),
+        hold: Mutex::default(),
         rt: rt.handle().clone(),
         events,
         frame_pending: Default::default(),
     });
-    rt.spawn(run(shared.clone()));
+    rt.spawn(follow_conn(shared.clone(), client.conn()));
+    rt.spawn(follow_room(shared.clone(), client.clone()));
+    rt.spawn(forward(shared.clone(), client.events(), |e| Some(Event::RoomEvent(e))));
+    rt.spawn(forward(shared.clone(), client.control(), |m| match m {
+        Control::LinkStats { .. } | Control::Error { .. } => Some(Event::Control(m)),
+        _ => None,
+    }));
+    rt.spawn(read_replies(shared.clone(), client.replies()));
+    if shared.config.operator() {
+        rt.spawn(send_teleop(shared.clone()));
+    }
     shared
 }
 
-async fn run(shared: Arc<Shared>) {
+/// Options for each connection attempt: the relay found over HTTP(S), and
+/// a token (given, signed here, or from a dev relay).
+async fn options(c: Config) -> anyhow::Result<tq::Options> {
+    let sub = format!("app-{}", c.preset);
+    let token = match (&c.token, &c.secret) {
+        (Some(t), _) => Token::Given(t.clone()),
+        (None, Some(secret)) => Token::Signed {
+            secret: secret.clone(),
+            perms: Perms::preset(&c.preset).with_context(|| format!("unknown preset '{}'", c.preset))?,
+            sub,
+            ttl: Duration::from_secs(12 * 3600),
+        },
+        (None, None) => Token::Dev {
+            preset: c.preset.clone(),
+            sub,
+        },
+    };
+    tq::Options::discover(&c.http, c.relay.as_deref(), &c.room, &token, c.build.clone()).await
+}
+
+/// Tells the UI about the connection as it comes and goes.
+async fn follow_conn(shared: Arc<Shared>, mut conn: tokio::sync::watch::Receiver<Conn>) {
     loop {
-        shared.event(Event::Status(ConnState::Connecting, None));
-        let mut wait = RECONNECT;
-        let reason = match connect(&shared).await {
-            Ok(session) => {
-                *shared.session.lock().unwrap() = Some(session.clone());
+        let c = conn.borrow_and_update().clone();
+        match c {
+            Conn::Connecting => shared.event(Event::Status(ConnState::Connecting, None)),
+            Conn::Connected(session) => {
                 shared.event(Event::Status(ConnState::Connected, None));
                 shared.event(Event::Connected {
                     session: session.id().to_string(),
                     relay: session.relay().clone(),
                 });
-                let reason = serve(&shared, &session).await;
-                *shared.session.lock().unwrap() = None;
-                session.close();
-                reason
             }
-            Err(e) => {
-                if e.is::<VersionRefused>() {
-                    wait = RECONNECT_REFUSED;
+            Conn::Down {
+                reason, incompatible, ..
+            } => {
+                for feed in shared.feeds() {
+                    feed.reset();
                 }
-                format!("{e:#}")
+                let reason = if incompatible {
+                    format!("{reason} (update the app or the relay)")
+                } else {
+                    reason
+                };
+                shared.event(Event::Status(ConnState::Closed, Some(reason)));
             }
-        };
-        for feed in shared.feeds() {
-            feed.reset();
         }
-        shared.event(Event::Status(ConnState::Closed, Some(reason)));
-        tokio::time::sleep(wait).await;
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct Info {
-    quic_port: u16,
-    sha256: String,
-    self_signed: bool,
-    #[serde(default)]
-    build: Option<BuildInfo>,
-}
-
-/// The relay speaks another protocol major; the app does not connect.
-#[derive(Debug)]
-pub struct VersionRefused(pub String);
-
-impl std::fmt::Display for VersionRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "incompatible relay: {} (update the app or the relay)", self.0)
-    }
-}
-
-impl std::error::Error for VersionRefused {}
-
-async fn connect(shared: &Shared) -> anyhow::Result<Session> {
-    let c = &shared.config;
-    let info: Info = http_get_json(&c.http.join("/api/info")?)
-        .await
-        .context("relay /api/info")?;
-    if Compat::of_build(info.build.as_ref()) == Compat::Incompatible {
-        return Err(VersionRefused(tq_wire::mismatch("relay", info.build.as_ref(), "tq-app")).into());
-    }
-    let token = match (&c.token, &c.secret) {
-        (Some(t), _) => t.clone(),
-        (None, Some(secret)) => tq_wire::sign_token(
-            secret.as_bytes(),
-            &tq_wire::Claims {
-                sub: format!("app-{}", c.preset),
-                room: c.room.clone(),
-                exp: now_us() / 1_000_000 + 12 * 3600,
-                perms: Perms::preset(&c.preset).with_context(|| format!("unknown preset '{}'", c.preset))?,
-            },
-        ),
-        (None, None) => {
-            let mut url = c.http.join("/api/dev/token")?;
-            url.query_pairs_mut()
-                .append_pair("preset", &c.preset)
-                .append_pair("room", &c.room)
-                .append_pair("sub", &format!("app-{}", c.preset));
-            let v: serde_json::Value = http_get_json(&url)
-                .await
-                .context("no --token and the relay does not mint dev tokens")?;
-            v["token"].as_str().context("no token in response")?.to_string()
+        if conn.changed().await.is_err() {
+            return;
         }
-    };
-    let trust = if info.self_signed {
-        ServerTrust::Hashes(vec![tq_transport::cert::parse_hash(&info.sha256)?])
-    } else {
-        ServerTrust::SystemRoots
-    };
-    let host = match &c.relay {
-        Some(r) => r.clone(),
-        None => {
-            let h = c.http.host_str().context("relay URL has no host")?;
-            let h = if h.contains(':') && !h.starts_with('[') {
-                format!("[{h}]")
-            } else {
-                h.to_string()
-            };
-            format!("{h}:{}", info.quic_port)
-        }
-    };
-    Session::connect(tq::Options {
-        relay_url: url::Url::parse(&format!("https://{host}"))?,
-        room: c.room.clone(),
-        token,
-        trust,
-        quic: Default::default(),
-        build: c.build.clone(),
-    })
-    .await
-}
-
-/// Runs one connected session until it closes; returns why.
-async fn serve(shared: &Arc<Shared>, session: &Session) -> String {
-    // Taken before anything runs, so nothing that follows the welcome is
-    // missed.
-    let (events, control, replies) = (session.events(), session.control(), session.replies());
-    // Dropped (and so aborted) when the session ends.
-    let mut tasks = tokio::task::JoinSet::new();
-    tasks.spawn(follow_room(shared.clone(), session.clone()));
-    tasks.spawn(forward(shared.clone(), events, |e| Some(Event::RoomEvent(e))));
-    tasks.spawn(forward(shared.clone(), control, |m| match m {
-        Control::LinkStats { .. } | Control::Error { .. } => Some(Event::Control(m)),
-        _ => None,
-    }));
-    tasks.spawn(read_replies(shared.clone(), replies));
-    if shared.config.operator() {
-        tasks.spawn(send_teleop(shared.clone(), session.clone()));
     }
-    session.closed().await
 }
 
 /// Passes what `f` picks from a session broadcast on to the UI.
@@ -463,11 +400,11 @@ impl Drop for Subs {
 }
 
 /// Follows the room's state: passes it to the UI and keeps one
-/// subscription per video, `.status` and `.events` track.
-async fn follow_room(shared: Arc<Shared>, session: Session) {
-    let mut room = session.room();
+/// subscription per video, `.status` and `.events` track. Subscriptions
+/// are the client's, so they carry on across reconnects.
+async fn follow_room(shared: Arc<Shared>, client: Client) {
+    let mut room = client.room();
     let mut subs = Subs::default();
-    let mut changed = true;
     loop {
         let state = room.borrow_and_update().clone();
         let mut wanted = HashSet::new();
@@ -481,10 +418,11 @@ async fn follow_room(shared: Arc<Shared>, session: Session) {
                     _ => continue,
                 };
                 wanted.insert(path.clone());
-                if subs.0.get(&path).is_some_and(|h| !h.is_finished()) {
+                if subs.0.contains_key(&path) {
                     continue;
                 }
-                let task = read_track(shared.clone(), session.clone(), path.clone(), sub);
+                let reader = client.subscribe(path.clone());
+                let task = read_track(shared.clone(), reader, sub);
                 subs.0.insert(path, tokio::spawn(task));
             }
         }
@@ -495,38 +433,21 @@ async fn follow_room(shared: Arc<Shared>, session: Session) {
             }
             keep
         });
-        if changed {
-            shared.event(Event::Room(state));
-        }
-        // Also wake now and then to retry failed subscriptions.
-        tokio::select! {
-            r = room.changed() => {
-                if r.is_err() {
-                    return;
-                }
-                changed = true;
-            }
-            _ = tokio::time::sleep(RESUBSCRIBE) => changed = false,
+        shared.event(Event::Room(state));
+        if room.changed().await.is_err() {
+            return;
         }
     }
 }
 
-async fn read_track(shared: Arc<Shared>, session: Session, path: Path, sub: Sub) {
-    let mut reader = match session.subscribe(path.clone()).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(track = %path, error = format!("{e:#}"), "subscribe failed");
-            tokio::time::sleep(RESUBSCRIBE).await;
-            return;
-        }
-    };
-    tracing::debug!(track = %path, "subscribed");
+async fn read_track(shared: Arc<Shared>, mut reader: tq::Reader, sub: Sub) {
+    let path = reader.path().clone();
     while let Some(f) = reader.recv().await {
         match &sub {
             Sub::Video(feed) => {
                 // Arrival time, not now: time spent queued in the SDK is
                 // decoder backlog too.
-                let queued = Duration::from_micros(now_us().saturating_sub(f.recv_us));
+                let queued = Duration::from_micros(tq_wire::now_us().saturating_sub(f.recv_us));
                 let now = Instant::now();
                 feed.push(Job {
                     group: f.group,
@@ -535,6 +456,7 @@ async fn read_track(shared: Arc<Shared>, session: Session, path: Path, sub: Sub)
                     payload: f.payload,
                     recv_us: f.recv_us,
                     recv_at: now.checked_sub(queued).unwrap_or(now),
+                    clocks: f.clocks,
                 });
             }
             Sub::Status => match f.json::<serde_json::Value>() {
@@ -542,7 +464,22 @@ async fn read_track(shared: Arc<Shared>, session: Session, path: Path, sub: Sub)
                 Err(e) => tracing::debug!(track = %path, "bad status: {e}"),
             },
             Sub::Events => match f.json::<serde_json::Value>() {
-                Ok(v) => shared.event(Event::Log(format!("{}: {}", path.broadcast, describe_robot_event(&v)))),
+                Ok(v) => {
+                    // The relay replays the newest group on subscribing, so
+                    // an event can be old: show when it happened.
+                    let at = match f.capture_local_us() {
+                        Some(at) => at,
+                        None => match shared.session() {
+                            Some(s) => s
+                                .wait_owner_offset(&path.broadcast, CLOCK_WAIT)
+                                .await
+                                .map_or(f.recv_us, |o| o.to_local(f.header.capture_us)),
+                            None => f.recv_us,
+                        },
+                    };
+                    let line = format!("{}: {}", path.broadcast, describe_robot_event(&v));
+                    shared.event(Event::LogAt(at, line));
+                }
                 Err(e) => tracing::debug!(track = %path, "bad event: {e}"),
             },
         }
@@ -597,99 +534,26 @@ async fn read_replies(shared: Arc<Shared>, mut rx: broadcast::Receiver<Reply>) {
     }
 }
 
-/// Heartbeats on the drive lock while this session holds it (100 ms), and
-/// drive commands on its channel (20 Hz while active). Stopping either lets
-/// the robot's watchdog trip, by design.
-async fn send_teleop(shared: Arc<Shared>, session: Session) {
-    let room = session.room();
+/// Drive commands on the drive channel, 20 Hz while active. Stopping lets
+/// the robot's watchdog trip, by design. (Heartbeats are the [`Hold`]'s.)
+async fn send_teleop(shared: Arc<Shared>) {
     let mut tick = tokio::time::interval(TELEOP);
-    let mut last_hb: Option<Instant> = None;
     loop {
         tick.tick().await;
-        let (lock, mine) = {
-            let r = room.borrow();
-            let Some(b) = drive_broadcast(&r) else {
-                continue;
-            };
-            let holder = b.lock(DRIVE).and_then(|l| l.holder.as_deref());
-            (Path::new(&b.name, DRIVE), holder == Some(session.id()))
-        };
-        if mine && last_hb.is_none_or(|t| t.elapsed() >= HEARTBEAT) {
-            last_hb = Some(Instant::now());
-            let _ = session.heartbeat(&lock);
-        }
         let drive = *shared.drive.lock().unwrap();
-        if drive.active {
-            let msg = serde_json::json!({
-                "command": "drive",
-                "args": { "throttle": drive.throttle, "steer": drive.steer },
-            });
-            let _ = session.channel(lock).send_json(&msg);
+        if !drive.active {
+            continue;
         }
+        let Some(session) = shared.session() else {
+            continue;
+        };
+        let Some(lock) = drive_broadcast(&session.room().borrow()).map(|b| Path::new(&b.name, DRIVE)) else {
+            continue;
+        };
+        let msg = serde_json::json!({
+            "command": "drive",
+            "args": { "throttle": drive.throttle, "steer": drive.steer },
+        });
+        let _ = session.channel(lock).send_json(&msg);
     }
-}
-
-/// Minimal HTTP/1.0 GET for the relay's JSON endpoints: plain for `http://`
-/// (dev, self-signed relays), TLS over the system roots for `https://`.
-async fn http_get_json<T: serde::de::DeserializeOwned>(url: &url::Url) -> anyhow::Result<T> {
-    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-    async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, request: &str) -> anyhow::Result<Vec<u8>> {
-        s.write_all(request.as_bytes()).await?;
-        // A TLS stream may still hold the encrypted request until flushed.
-        s.flush().await?;
-        let mut body = Vec::new();
-        match s.read_to_end(&mut body).await {
-            Ok(_) => {}
-            // Some servers close without a TLS close_notify; the HTTP/1.0
-            // body ends at the close either way.
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !body.is_empty() => {}
-            Err(e) => return Err(e.into()),
-        }
-        Ok(body)
-    }
-
-    let host = url.host_str().context("no host")?;
-    let port = url.port_or_known_default().unwrap_or(80);
-    let addr = format!(
-        "{}:{port}",
-        if host.contains(':') {
-            format!("[{host}]")
-        } else {
-            host.to_string()
-        }
-    );
-    let path = match url.query() {
-        Some(q) => format!("{}?{q}", url.path()),
-        None => url.path().to_string(),
-    };
-    let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n");
-    // 5 s for the whole request, of which at most 3 s to connect.
-    let response = tokio::time::timeout(Duration::from_secs(5), async {
-        let tcp = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(&addr))
-            .await
-            .context("connect timeout")??;
-        match url.scheme() {
-            "https" => {
-                let tls = tokio_rustls::TlsConnector::from(Arc::new(tq_transport::quic::https_client_config()?));
-                let name = rustls_pki_name(host)?;
-                exchange(tls.connect(name, tcp).await?, &request).await
-            }
-            "http" => exchange(tcp, &request).await,
-            other => anyhow::bail!("unsupported scheme {other}://"),
-        }
-    })
-    .await
-    .context("timeout")??;
-    let text = String::from_utf8_lossy(&response);
-    let (head, body) = text.split_once("\r\n\r\n").context("bad HTTP response")?;
-    let status = head.split_whitespace().nth(1).unwrap_or("");
-    if status != "200" {
-        anyhow::bail!("HTTP {status}: {}", body.trim());
-    }
-    Ok(serde_json::from_str(body)?)
-}
-
-fn rustls_pki_name(host: &str) -> anyhow::Result<tokio_rustls::rustls::pki_types::ServerName<'static>> {
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string()).context("invalid TLS server name")
 }

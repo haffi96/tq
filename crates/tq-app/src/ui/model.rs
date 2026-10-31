@@ -50,7 +50,9 @@ pub struct Model {
     /// Which dock panels are open.
     pub sidebar: bool,
     pub bottom: bool,
-    pub log: Vec<(String, String)>,
+    /// Newest first: when it happened (Unix µs, this machine's clock) and
+    /// the line.
+    pub log: Vec<(u64, String)>,
     /// Per feed capture -> render, oldest first; `None` for a tick
     /// without frames.
     pub history: HashMap<String, VecDeque<Option<f64>>>,
@@ -330,6 +332,7 @@ impl Model {
                 }
             }
             Event::Log(line) => self.push_log(line),
+            Event::LogAt(at_us, line) => self.push_log_at(at_us, line),
             Event::Control(msg) => match msg {
                 Control::LinkStats { quic } => {
                     self.link = Some(format!(
@@ -413,7 +416,14 @@ impl Model {
     }
 
     fn push_log(&mut self, line: String) {
-        self.log.insert(0, (time_of_day(), line));
+        self.push_log_at(tq_wire::now_us(), line);
+    }
+
+    /// A line that happened at `at_us`, in time order: a broadcast's
+    /// `.events` replayed on subscribing can be older than lines before it.
+    fn push_log_at(&mut self, at_us: u64, line: String) {
+        let i = self.log.partition_point(|(t, _)| *t > at_us);
+        self.log.insert(i, (at_us, line));
         self.log.truncate(LOG_LINES);
     }
 
@@ -455,7 +465,7 @@ fn push<T>(h: &mut VecDeque<T>, v: T) {
     h.push_back(v);
 }
 
-fn time_of_day() -> String {
-    let secs = tq_wire::now_us() / 1_000_000;
+pub fn time_of_day(us: u64) -> String {
+    let secs = us / 1_000_000;
     format!("{:02}:{:02}:{:02}Z", secs / 3600 % 24, secs / 60 % 60, secs % 60)
 }

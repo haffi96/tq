@@ -159,6 +159,10 @@ impl RoomState {
     pub fn track(&self, path: &Path) -> Option<&TrackState> {
         self.broadcast(&path.broadcast)?.track(&path.name)
     }
+
+    pub fn lock(&self, path: &Path) -> Option<&LockState> {
+        self.broadcast(&path.broadcast)?.lock(&path.name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

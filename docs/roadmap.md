@@ -48,12 +48,10 @@ format, `crates/tq/src/lib.rs` for the SDK, and
   tq-app is not a default member, so plain `cargo build` skips it.
 - `cd web && bun run typecheck && bun run build`: passes.
 - Live teleop through tq-probe with the real encoders.
-
-**Not verified yet (do this first):** the web console and tq-app have only
-been compiled, never run against a relay. Run `dev/run-local.sh`, open
-`http://localhost:8080/?room=robot-01&preset=operator`, run
-`cargo run --release -p tq-app -- --preset operator`, then claim and
-drive.
+- Both consoles against `dev/run-local.sh` (2026-10-31): H.264 and H.265
+  video, claim, WASD and 20 Hz streaming (acks ok, the robot counts the
+  commands), the stale-message trip, E-stop, release, and force-claim
+  between the web console and tq-app in both directions.
 
 **Headless end-to-end check** (needs `../streaming-tools`): with
 `dev/run-local.sh` running, run
@@ -98,22 +96,33 @@ apps, tq-probe). Teleop is the regression test.
 - Checked: the grep above is empty; relay end-to-end tests cover
   publishing, subscribing, permissions, thinning, channels, locks, the
   watchdog, outages and takeover; teleop works end to end with the real
-  encoders through tq-probe. The consoles are only build-checked so far.
+  encoders through tq-probe and both consoles.
 
 ### Phase 2: SDK extraction — Rust half done
 
-Done, pulled into Phase 1 so each client was ported once:
+Done (the crate was pulled into Phase 1 so each client was ported once):
 - A `tq` crate: `Session` (subscribe, channels, locks, clocks) and
   `Publication` (a broadcast that outlives reconnects: tracks, an inbox for
   channel messages with latest-wins sequencing, lock holders, watchdogs).
   tq-publisher, tq-probe and tq-app use it.
+- The gaps found porting tq-app:
+  - `Client`: reconnects with backoff (longer after an incompatible
+    relay), resubscribes (`Client::subscribe` readers survive reconnects,
+    with group numbers that keep increasing), publishes again, and carries
+    the room, events and replies across sessions. Locks do not carry over.
+  - `Session::hold(lock, force, interval)`: claims and heartbeats; `lost()`
+    when forced away or the session ends; dropping it releases.
+  - `Frame::clocks`, `capture_local_us()` and `hops()` put a frame on the
+    local clock; `Session::wait_owner_offset` covers frames that arrive
+    before the first ping.
+  - `tq::discover`: `/api/info`, dev tokens, a `Token` (given, signed or
+    dev) and `Options::discover`, over HTTP or HTTPS.
+  - tq-app runs on `Client`, `hold` and `discover`; tq-publisher on
+    `Client`; tq-probe on `hold` and `hops`. Tests: `hold_heartbeats_*`,
+    `client_resubscribes_and_republishes`, `discover_over_http`. Checked
+    live, including a relay restart under both.
 
 Still to do:
-- SDK gaps found porting tq-app: a reconnecting session whose
-  subscriptions survive reconnects; a lock-holding guard that heartbeats
-  (`session.hold(lock, interval)`); a helper that puts a frame's timestamps
-  on the local clock; relay discovery over HTTPS (`/api/info`, dev tokens)
-  so apps do not carry their own HTTP client.
 - `tq-publisher` → `tq-edge`: a config-driven agent on the device (sources to
   tracks, channels to sinks).
 - Goal: publishing a camera and a channel is about 10 lines of Rust.

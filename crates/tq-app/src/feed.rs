@@ -32,6 +32,8 @@ pub struct Job {
     pub payload: Bytes,
     pub recv_us: u64,
     pub recv_at: Instant,
+    /// Clock offsets when it arrived.
+    pub clocks: tq::Clocks,
 }
 
 enum Msg {
@@ -228,7 +230,7 @@ fn decode_loop(feed: Weak<Feed>, shared: Weak<Shared>, rx: mpsc::Receiver<Msg>) 
         let h = job.header;
         let key = h.is_key();
         // Relay and owner clocks, each minus this one.
-        let (relay, owner) = shared.offsets(&feed.path.broadcast);
+        let tq::Clocks { relay, owner } = job.clocks;
         // Capture times are real only from the encoder's SEI.
         let sei = h.flags & FLAG_CAPTURE_FROM_SEI != 0;
         let capture_here = owner.filter(|_| sei).map(|o| o.to_local(h.capture_us) as i64);

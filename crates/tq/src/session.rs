@@ -60,6 +60,8 @@ pub struct Frame {
     pub payload: Bytes,
     /// When it arrived, this machine's clock.
     pub recv_us: u64,
+    /// The clock offsets known when it arrived.
+    pub clocks: Clocks,
 }
 
 impl Frame {
@@ -70,7 +72,75 @@ impl Frame {
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.payload)
     }
+
+    /// When it was captured, on this machine's clock (Unix µs). `None`
+    /// until the clock offsets are measured, just after connecting; see
+    /// [`Session::wait_owner_offset`]. A video frame's capture time is
+    /// the owner's receive time unless `FLAG_CAPTURE_FROM_SEI` is set.
+    pub fn capture_local_us(&self) -> Option<u64> {
+        Some(self.clocks.owner?.to_local(self.header.capture_us))
+    }
+
+    /// Its time on each hop, every number between two clocks converted.
+    pub fn hops(&self) -> Hops {
+        let h = &self.header;
+        let ms = |a: u64, b: u64| (a as f64 - b as f64) / 1000.0;
+        let relay_here = self.clocks.relay.map(|o| o.to_local(h.relay_us));
+        let owner = self.clocks.owner;
+        Hops {
+            capture_to_publisher_ms: ms(h.publisher_us, h.capture_us),
+            publisher_to_relay_ms: relay_here
+                .zip(owner)
+                .map(|(r, o)| ms(r, o.to_local(h.publisher_us))),
+            relay_to_here_ms: relay_here.map(|r| ms(self.recv_us, r)),
+            capture_to_here_ms: owner.map(|o| ms(self.recv_us, o.to_local(h.capture_us))),
+        }
+    }
 }
+
+/// Clock offsets: relay − this machine, and the frame's owner − this
+/// machine (both hops composed).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Clocks {
+    pub relay: Option<Offset>,
+    pub owner: Option<Offset>,
+}
+
+impl Clocks {
+    /// The error bound of anything compared across owner and here, µs.
+    pub fn error_us(&self) -> Option<i64> {
+        self.owner.map(|o| o.error_us)
+    }
+}
+
+/// A frame's latency per hop, ms. The owner hop is on one clock; the
+/// rest are `None` until the clock offsets are known.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hops {
+    pub capture_to_publisher_ms: f64,
+    pub publisher_to_relay_ms: Option<f64>,
+    pub relay_to_here_ms: Option<f64>,
+    pub capture_to_here_ms: Option<f64>,
+}
+
+/// A lock claim the relay refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refused {
+    /// Who holds it, if anyone.
+    pub holder: Option<String>,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.holder {
+            Some(h) => write!(f, "{} (held by {h})", self.reason),
+            None => f.write_str(&self.reason),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
 
 /// An ack or echo for something this session sent.
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +201,29 @@ impl Inner {
 
     fn publication(&self, name: &str) -> Option<Arc<Publication>> {
         self.pubs.lock().unwrap().iter().find(|p| p.name() == name).cloned()
+    }
+
+    fn relay_offset(&self) -> Option<Offset> {
+        self.clock.lock().unwrap().estimate()
+    }
+
+    fn owner_offset(&self, broadcast: &str) -> Option<Offset> {
+        let owner = {
+            let room = self.room.borrow();
+            let b = room.broadcast(broadcast)?;
+            Offset {
+                offset_us: b.clock_offset_us?,
+                error_us: b.clock_error_us.unwrap_or(0),
+            }
+        };
+        Some(self.relay_offset()?.then(owner))
+    }
+
+    fn clocks(&self, broadcast: &str) -> Clocks {
+        Clocks {
+            relay: self.relay_offset(),
+            owner: self.owner_offset(broadcast),
+        }
     }
 
     fn publication_at(&self, owner_index: u16) -> Option<Arc<Publication>> {
@@ -203,7 +296,7 @@ impl Session {
             Compat::Incompatible => {
                 let reason = tq_wire::mismatch("relay", Some(&relay), &opts.build.component);
                 wt.close(tq_wire::code::UNSUPPORTED_VERSION, reason.as_bytes());
-                anyhow::bail!("incompatible relay: {reason}");
+                return Err(crate::Incompatible(reason).into());
             }
         }
 
@@ -295,7 +388,7 @@ impl Session {
 
     /// Relay clock minus this machine's clock.
     pub fn relay_offset(&self) -> Option<Offset> {
-        self.inner.clock.lock().unwrap().estimate()
+        self.inner.relay_offset()
     }
 
     /// Round trip of the latest ping to the relay, ms.
@@ -306,13 +399,23 @@ impl Session {
     /// A broadcast owner's clock minus this machine's clock, from both
     /// hops' offsets; its error is the sum of both bounds.
     pub fn owner_offset(&self, broadcast: &str) -> Option<Offset> {
-        let room = self.inner.room.borrow();
-        let b = room.broadcast(broadcast)?;
-        let owner = Offset {
-            offset_us: b.clock_offset_us?,
-            error_us: b.clock_error_us.unwrap_or(0),
-        };
-        Some(self.relay_offset()?.then(owner))
+        self.inner.owner_offset(broadcast)
+    }
+
+    /// [`Session::owner_offset`], waiting up to `timeout` for it: just
+    /// after connecting, frames (such as the newest group the relay
+    /// replays) can arrive before the first ping has come back.
+    pub async fn wait_owner_offset(&self, broadcast: &str, timeout: Duration) -> Option<Offset> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(o) = self.owner_offset(broadcast) {
+                return Some(o);
+            }
+            if tokio::time::Instant::now() >= deadline || self.is_closed() {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Resolves when the session has ended, with why.
@@ -433,9 +536,10 @@ impl Session {
         Ok(seq)
     }
 
-    /// Claims a lock. `Ok(Err(holder, reason))` when someone else holds it
-    /// (or the relay refused).
-    pub async fn claim(&self, lock: Path, force: bool) -> anyhow::Result<Result<(), (Option<String>, String)>> {
+    /// Claims a lock. `Ok(Err(_))` when someone else holds it (or the
+    /// relay refused). Holding it means heartbeating it; [`Session::hold`]
+    /// does both.
+    pub async fn claim(&self, lock: Path, force: bool) -> anyhow::Result<Result<(), Refused>> {
         let want = lock.clone();
         self.request(Control::Claim { lock, force }, |m| match m {
             Control::ClaimResult {
@@ -445,7 +549,10 @@ impl Session {
                 reason,
             } if *lock == want => Some(match ok {
                 true => Ok(()),
-                false => Err((holder.clone(), reason.clone().unwrap_or_default())),
+                false => Err(Refused {
+                    holder: holder.clone(),
+                    reason: reason.clone().unwrap_or_default(),
+                }),
             }),
             _ => None,
         })
@@ -460,6 +567,25 @@ impl Session {
             _ => None,
         })
         .await
+    }
+
+    /// Claims a lock and heartbeats it every `interval` until the returned
+    /// [`Hold`] is dropped (which releases it) or the lock is lost: taken by
+    /// force, or this session ended.
+    pub async fn hold(&self, lock: Path, force: bool, interval: Duration) -> anyhow::Result<Result<Hold, Refused>> {
+        // Subscribed first, so a forced take right after the claim is seen.
+        let events = self.events();
+        if let Err(refused) = self.claim(lock.clone(), force).await? {
+            return Ok(Err(refused));
+        }
+        let (held_tx, held) = watch::channel(true);
+        let task = tokio::spawn(heartbeat(self.clone(), lock.clone(), interval, events, held_tx));
+        Ok(Ok(Hold {
+            lock,
+            session: self.clone(),
+            held,
+            task,
+        }))
     }
 
     // --- publishing -----------------------------------------------------
@@ -568,6 +694,112 @@ fn next_seq(inner: &Inner, path: &Path) -> u32 {
     let s = seqs.entry(path.clone()).or_insert(0);
     *s = s.wrapping_add(1);
     *s
+}
+
+/// A lock this session holds, heartbeated in the background. Dropping it
+/// releases the lock (without waiting for the relay).
+pub struct Hold {
+    lock: Path,
+    session: Session,
+    held: watch::Receiver<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Hold {
+    pub fn lock(&self) -> &Path {
+        &self.lock
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Whether the lock is still this session's.
+    pub fn is_held(&self) -> bool {
+        *self.held.borrow()
+    }
+
+    /// Resolves once the lock is lost: taken by force, or the session
+    /// ended. Heartbeats have stopped by then.
+    pub async fn lost(&self) {
+        let mut held = self.held.clone();
+        let _ = held.wait_for(|h| !h).await;
+    }
+
+    /// Releases the lock and waits for the relay to confirm.
+    pub async fn release(self) -> anyhow::Result<bool> {
+        self.task.abort();
+        if !self.is_held() {
+            return Ok(false);
+        }
+        let (session, lock) = (self.session.clone(), self.lock.clone());
+        // Released here; `Drop` must not send it again.
+        std::mem::forget(self);
+        session.release(lock).await
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.task.abort();
+        if self.is_held() {
+            self.session.inner.send(Control::Release {
+                lock: self.lock.clone(),
+            });
+        }
+    }
+}
+
+/// Heartbeats `lock` until it is no longer this session's.
+async fn heartbeat(
+    session: Session,
+    lock: Path,
+    interval: Duration,
+    mut events: broadcast::Receiver<RoomEvent>,
+    held: watch::Sender<bool>,
+) {
+    let me = session.id().to_string();
+    let mut room = session.room();
+    let mut tick = tokio::time::interval(interval);
+    // The claim's result and the state that shows it travel on different
+    // streams: the state counts only once it has shown this session.
+    let mut seen = false;
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                if session.heartbeat(&lock).is_err() && session.is_closed() {
+                    break;
+                }
+            }
+            r = room.changed() => {
+                if r.is_err() {
+                    break;
+                }
+                let holder = room.borrow_and_update().lock(&lock).map(|l| l.holder.clone());
+                match holder {
+                    Some(Some(h)) if h == me => seen = true,
+                    // Gone from the room, or someone else's (or free) after
+                    // having been ours.
+                    None => break,
+                    Some(_) if seen => break,
+                    Some(_) => {}
+                }
+            }
+            e = events.recv() => match e {
+                Ok(e) => {
+                    if let tq_wire::Event::LockChanged { lock: l, from: Some(from), .. } = &e.event {
+                        if *l == lock && *from == me {
+                            break;
+                        }
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            },
+            _ = session.closed() => break,
+        }
+    }
+    held.send_replace(false);
 }
 
 /// Frames of one subscribed track. Dropping it unsubscribes.
@@ -796,12 +1028,13 @@ async fn read_group(inner: Arc<Inner>, mut reader: GroupReader) -> anyhow::Resul
             return Ok(());
         }
         let frame = Frame {
+            recv_us: now_us(),
+            clocks: inner.clocks(&path.broadcast),
             track: path.clone(),
             group: h.group,
             codec: codec.clone(),
             header,
             payload,
-            recv_us: now_us(),
         };
         match tx.try_send(frame) {
             Ok(()) => {}
@@ -845,6 +1078,7 @@ async fn read_datagrams(inner: Arc<Inner>) -> anyhow::Result<()> {
                 let tx = inner.subs.lock().unwrap().get(&path).map(|e| e.tx.clone());
                 if let Some(tx) = tx {
                     let _ = tx.try_send(Frame {
+                        clocks: inner.clocks(&path.broadcast),
                         track: path,
                         group: 0,
                         codec,

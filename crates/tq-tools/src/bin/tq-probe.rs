@@ -245,13 +245,7 @@ async fn read_track(session: Session, path: Path, kind: TrackKind, shared: Arc<M
     let mut reader = session.subscribe(path.clone()).await?;
     tracing::info!(track = %path, "subscribed");
     while let Some(f) = reader.recv().await {
-        // Everything on this machine's clock.
-        let relay = session.relay_offset().unwrap_or_default();
-        let owner = session.owner_offset(&path.broadcast).unwrap_or(relay);
-        let recv = f.recv_us as f64;
-        let relay_us = relay.to_local(f.header.relay_us) as f64;
-        let publisher_us = owner.to_local(f.header.publisher_us) as f64;
-        let capture_us = owner.to_local(f.header.capture_us) as f64;
+        let hops = f.hops();
         let mut s = shared.lock().unwrap();
         let t = s.tracks.entry(path.clone()).or_default();
         t.kind = format!("{kind:?}").to_lowercase();
@@ -261,11 +255,19 @@ async fn read_track(session: Session, path: Path, kind: TrackKind, shared: Arc<M
         if t.codec != *f.codec {
             t.codec = f.codec.to_string();
         }
-        t.publisher_to_relay.add((relay_us - publisher_us) / 1000.0);
-        t.relay_to_probe.add((recv - relay_us) / 1000.0);
+        // Until the clocks are measured, just after connecting, the
+        // cross-machine numbers are unknown and left out.
+        if let Some(ms) = hops.publisher_to_relay_ms {
+            t.publisher_to_relay.add(ms);
+        }
+        if let Some(ms) = hops.relay_to_here_ms {
+            t.relay_to_probe.add(ms);
+        }
         // Video capture times are only real with the encoder's SEI.
         if kind == TrackKind::Data || f.header.flags & FLAG_CAPTURE_FROM_SEI != 0 {
-            t.capture_to_probe.add((recv - capture_us) / 1000.0);
+            if let Some(ms) = hops.capture_to_here_ms {
+                t.capture_to_probe.add(ms);
+            }
         }
     }
     Ok(())
@@ -290,10 +292,15 @@ async fn teleop(session: Session, only: Option<String>, hz: f64, shared: Arc<Mut
             return;
         }
     };
+    // Heartbeated while held; dropped (released) when the probe ends.
+    let mut holds = Vec::new();
     for lock in &locks {
-        match session.claim(lock.clone(), true).await {
-            Ok(Ok(())) => tracing::info!(%lock, "claimed"),
-            Ok(Err((holder, reason))) => tracing::warn!(%lock, ?holder, %reason, "claim refused"),
+        match session.hold(lock.clone(), true, Duration::from_millis(100)).await {
+            Ok(Ok(hold)) => {
+                tracing::info!(%lock, "claimed");
+                holds.push(hold);
+            }
+            Ok(Err(refused)) => tracing::warn!(%lock, %refused, "claim refused"),
             Err(e) => tracing::warn!(%lock, error = format!("{e:#}"), "claim failed"),
         }
     }
@@ -318,17 +325,14 @@ async fn teleop(session: Session, only: Option<String>, hz: f64, shared: Arc<Mut
     }
     let channels: Vec<_> = locks.iter().map(|l| session.channel(l.clone())).collect();
     let mut t = tokio::time::interval(Duration::from_secs_f64(1.0 / hz));
-    let mut last_hb = Instant::now() - Duration::from_secs(1);
     loop {
         t.tick().await;
         for c in &channels {
             let _ = c.send_json(&serde_json::json!({"command": "drive", "args": {"throttle": 0.1, "steer": 0.0}}));
         }
-        if last_hb.elapsed() >= Duration::from_millis(100) {
-            last_hb = Instant::now();
-            for l in &locks {
-                let _ = session.heartbeat(l);
-            }
+        for h in holds.iter().filter(|h| !h.is_held()) {
+            tracing::warn!(lock = %h.lock(), "lock lost");
         }
+        holds.retain(|h| h.is_held());
     }
 }

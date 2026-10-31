@@ -38,6 +38,11 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with(false).await
+    }
+
+    /// With `dev`, the relay mints console tokens over HTTP.
+    async fn start_with(dev: bool) -> Self {
         let _ = tracing_subscriber::fmt()
             .with_test_writer()
             .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
@@ -67,7 +72,7 @@ impl Harness {
             cert_hash: cert.hash_hex(),
             self_signed: true,
             quic_port: port,
-            dev: false,
+            dev,
             realtime_policy: policy,
             smooth_policy: policy,
         });
@@ -453,7 +458,7 @@ async fn channels_locks_and_watchdog() {
 
     // Another operator: refused without force, takes over with it.
     let mut events = viewer.events();
-    let (holder, _) = op2.claim(path("rover/drive"), false).await.unwrap().unwrap_err();
+    let holder = op2.claim(path("rover/drive"), false).await.unwrap().unwrap_err().holder;
     assert_eq!(holder.as_deref(), Some(op1.id()));
     assert!(op2.claim(path("rover/drive"), true).await.unwrap().is_ok());
     let reason = expect(&mut events, |e| match e {
@@ -476,6 +481,179 @@ async fn channels_locks_and_watchdog() {
     })
     .await;
     assert_eq!(reason, LockChange::Left);
+}
+
+#[tokio::test]
+async fn hold_heartbeats_until_lost_or_dropped() {
+    let h = Harness::start().await;
+    let robot = h.session("robot", Perms::robot("rover")).await;
+    let (p, _inbox) = Publication::new(rover(vec![])).unwrap();
+    robot.publish(&p).await.unwrap();
+    let mut holders = p.holders();
+    let op1 = h.session("op1", Perms::operator()).await;
+    let op2 = h.session("op2", Perms::operator()).await;
+    for s in [&op1, &op2] {
+        until(s, |r| r.broadcast("rover").is_some()).await;
+    }
+
+    // Held: heartbeats go out by themselves and come back as echoes.
+    let mut replies = op1.replies();
+    let hold = op1
+        .hold(path("rover/drive"), false, Duration::from_millis(50))
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..3 {
+        let Reply::Echo { lock, .. } = reply(&mut replies).await else { panic!() };
+        assert_eq!(lock, path("rover/drive"));
+    }
+    assert!(hold.is_held());
+
+    // Refused while held; taken by force, the holder's hold is lost and
+    // its heartbeats stop.
+    let refused = op2
+        .hold(path("rover/drive"), false, Duration::from_millis(50))
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+    assert_eq!(refused.holder.as_deref(), Some(op1.id()));
+    let taken = op2
+        .hold(path("rover/drive"), true, Duration::from_millis(50))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(WAIT, hold.lost()).await.unwrap();
+    assert!(!hold.is_held());
+    drop(hold);
+    while replies.try_recv().is_ok() {}
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(replies.try_recv().is_err(), "heartbeats after the lock was lost");
+    // Dropping a lost hold does not release the new holder's lock.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(holders.borrow()["drive"].as_ref().map(|h| h.sid), Some(op2.sid()));
+
+    // Dropping a held hold releases the lock.
+    drop(taken);
+    holders.wait_for(|h| h["drive"].is_none()).await.unwrap();
+}
+
+#[tokio::test]
+async fn client_resubscribes_and_republishes() {
+    let h = Harness::start().await;
+    let client = |sub: &'static str, perms: Perms| {
+        let opts = h.options(sub, perms);
+        tq::Client::new(move || {
+            let opts = opts.clone();
+            async move { Ok(opts) }
+        })
+    };
+    let robot = client("robot", Perms::robot("rover"));
+    let (p, _inbox) = Publication::new(rover(vec![data("pose", Delivery::Latest)])).unwrap();
+    robot.publish(&p, Default::default());
+    p.set_online("pose", true, "");
+    let viewer = client("viewer", Perms::viewer());
+    let mut pose = viewer.subscribe(path("rover/pose"));
+    let mut demand = p.demand();
+    demand.wait_for(|d| d.get("pose") == Some(&1)).await.unwrap();
+    let pose_frame = async |r: &mut tq::Reader| {
+        tokio::time::timeout(WAIT, r.recv())
+            .await
+            .expect("timed out waiting for a frame")
+            .unwrap()
+    };
+    p.data("pose").unwrap().send_json(&1);
+    let first = pose_frame(&mut pose).await;
+    assert_eq!(first.json::<i32>().unwrap(), 1);
+
+    // Frames carry the clock offsets once they are measured.
+    let session = viewer.session().unwrap();
+    assert!(session.wait_owner_offset("rover", WAIT).await.is_some());
+    p.data("pose").unwrap().send_json(&2);
+    let f = pose_frame(&mut pose).await;
+    assert!(f.capture_local_us().is_some());
+    assert!(f.hops().relay_to_here_ms.is_some_and(|ms| (-1.0..1000.0).contains(&ms)));
+
+    // The viewer's session drops: the reader carries on in a newer group,
+    // starting with the relay's latest value.
+    session.close();
+    let f = pose_frame(&mut pose).await;
+    assert_ne!(viewer.session().map(|s| s.id().to_string()), Some(session.id().to_string()));
+    assert_eq!(f.json::<i32>().unwrap(), 2);
+    assert!(f.group > first.group);
+    let mut last = f.group;
+
+    // The robot's session drops: it publishes again on the next one.
+    let mut events = viewer.events();
+    robot.session().unwrap().close();
+    expect(&mut events, |e| matches!(e, Event::BroadcastStarted { .. }).then_some(())).await;
+    p.set_online("pose", true, "");
+    let mut demand = p.demand();
+    demand.wait_for(|d| d.get("pose") == Some(&1)).await.unwrap();
+    // (The publication's latest value, 2, goes out again first.)
+    for i in 3..6 {
+        p.data("pose").unwrap().send_json(&i);
+        loop {
+            let f = pose_frame(&mut pose).await;
+            assert!(f.group > last, "group {} after {last}", f.group);
+            last = f.group;
+            if f.json::<i32>().unwrap() == i {
+                break;
+            }
+        }
+    }
+
+    // Closing the client ends its readers.
+    viewer.close();
+    assert!(tokio::time::timeout(WAIT, pose.recv()).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn discover_over_http() {
+    let h = Harness::start_with(true).await;
+    let addr = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    tokio::spawn(crate::web::serve(
+        h.relay.clone(),
+        crate::web::Config {
+            addr,
+            web_dir: None,
+            tls: None,
+            cors_origins: vec![],
+        },
+    ));
+    let http: url::Url = format!("http://{addr}").parse().unwrap();
+    let info = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Ok(info) = tq::discover::relay_info(&http).await {
+                return info;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(info.quic_port, h.port);
+
+    // A dev token from a preset, and the QUIC endpoint and trust from
+    // /api/info.
+    let token = tq::Token::Dev {
+        preset: "viewer".into(),
+        sub: "finder".into(),
+    };
+    let opts = tq::Options::discover(&http, None, "r1", &token, tq_wire::build_info!("tq-test"))
+        .await
+        .unwrap();
+    assert_eq!(opts.relay_url.as_str(), format!("https://127.0.0.1:{}/", h.port));
+    let session = Session::connect(opts).await.unwrap();
+    assert_eq!(session.perms(), &Perms::viewer());
+    // Never a publishing token over HTTP.
+    let robot = tq::Token::Dev {
+        preset: "robot".into(),
+        sub: "x".into(),
+    };
+    assert!(tq::Options::discover(&http, None, "r1", &robot, tq_wire::build_info!("tq-test"))
+        .await
+        .is_err());
 }
 
 #[tokio::test]
