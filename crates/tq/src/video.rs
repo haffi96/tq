@@ -159,7 +159,9 @@ impl VideoWriter {
     }
 
     fn assemble(&mut self, flush: bool, capture_us: Option<u64>) {
-        if self.nals.is_empty() {
+        // A flush with no new NAL units still ends the access unit in
+        // progress (length-prefixed NALs are out as soon as they arrive).
+        if self.nals.is_empty() && !(flush && self.pipeline.is_some()) {
             return;
         }
         let (assembler, packager) = match self.pipeline.as_mut() {
@@ -221,5 +223,30 @@ impl VideoWriter {
             });
             self.index += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
+    const PPS: &[u8] = &[0x68, 0xce];
+    const IDR: &[u8] = &[0x65, 0x88];
+
+    #[test]
+    fn flush_ends_the_last_length_prefixed_frame() {
+        let (p, _inbox) = Publication::builder("rover").video("cam").build().unwrap();
+        let mut w = p.video("cam").unwrap();
+        let stream: Vec<u8> = [SPS, PPS, IDR]
+            .iter()
+            .flat_map(|n| [&(n.len() as u32).to_be_bytes()[..], n].concat())
+            .collect();
+        w.write(&stream).unwrap();
+        // Every NAL is out, but nothing yet says the picture has ended.
+        assert_eq!(w.frames(), 0);
+        w.flush();
+        assert_eq!(w.frames(), 1);
+        assert_eq!(p.video_track("cam").unwrap().subscribe().0.len(), 1);
     }
 }
