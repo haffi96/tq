@@ -94,8 +94,8 @@ pub async fn teleop(teleop: Arc<Teleop>, mut inbox: Inbox) {
     }
 }
 
-/// The robot's `.status` track: teleop and cameras, on every teleop change
-/// and at least every `interval_ms`.
+/// The robot's `.status` track: teleop and cameras, at once when teleop
+/// trips, re-arms or changes holder, and otherwise every `interval_ms`.
 pub async fn status(p: Arc<Publication>, teleop: Arc<Teleop>, cameras: Vec<Arc<Camera>>, interval_ms: u64) {
     let Some(out) = p.data(".status") else { return };
     p.set_online(".status", true, "");
@@ -115,9 +115,13 @@ pub async fn status(p: Arc<Publication>, teleop: Arc<Teleop>, cameras: Vec<Arc<C
             })
             .collect();
         out.send_json(&serde_json::json!({ "teleop": t, "cameras": cams }));
+        // Counters ride along with the next tick; only edges (trips,
+        // holder changes) go out at once.
+        let edge = |n: &tq_teleop::Status| (n.tripped, n.reason.clone(), n.holder.clone());
+        let was = edge(&t);
         tokio::select! {
             _ = tick.tick() => {}
-            r = teleop_status.changed() => if r.is_err() { return },
+            r = teleop_status.wait_for(|n| edge(n) != was) => if r.is_err() { return },
         }
     }
 }
