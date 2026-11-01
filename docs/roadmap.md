@@ -36,14 +36,14 @@ compatibility. The protocol goes to 3.0 ([protocol-3.md](protocol-3.md)).
 
 ## Current state (handoff)
 
-Updated 2026-10-31 (evening). Branch `generalize-core`, open as PR #9
-against `main`, up to date with it. Every CodeRabbit thread is answered
-and resolved, through its review of `0c49a27` (web layouts). CodeRabbit
-then paused automatic reviews on the PR (too many commits), so the tq-app
-commit `f2823f2` and the review fixes `3b02fea` have had no CodeRabbit
-review: comment `@coderabbitai review` (or `resume`) to get one.
-The tq-app layout editor is on branch `tq-app-editor`, stacked on
-`generalize-core` (its own PR); neither is merged.
+Updated 2026-11-01. Everything is merged to `main`: PR #9
+(`generalize-core`, protocol 3.0 and Phases 1 to 3) with PR #10 (tq-app's
+layout editor) squashed into it first. Released from `main`: **relay
+0.4.0** (`relay-v0.4.0`, web app 0.3.0 inside), **tq-edge 0.1.0**
+(`edge-v0.1.0`, its first release; it replaces tq-publisher) and **tq-app
+0.5.0** (`app-v0.5.0`). The relay on GCP (`tq-relay-1.haffi.dev`) runs
+0.4.0 and the web app at `tq.haffi.dev` is 0.3.0, so the hosted stack is
+all protocol 3.0. Start new work on a branch from `main`.
 Phase 1 is done; Phase 2's Rust half is done, tq-edge and the "about 10
 lines" SDK goal included. Phase 3: both consoles render layouts
 ([layout-1.md](layout-1.md)) and edit them (see below). Start with [protocol-3.md](protocol-3.md) for the wire
@@ -84,7 +84,7 @@ for tq-edge's config.
   commands, the lights sink, the teleop sink); `dev/run-local.sh` starts
   it with that config.
 
-**Verified (all on the current branch head):**
+**Verified (on `main` as merged):**
 - `cargo test` and `cargo clippy --all-targets`: clean, including the
   relay's end-to-end tests (16), tq-edge's config tests and the SDK's.
 - `cargo build -p tq-app && cargo clippy -p tq-app --all-targets`: clean.
@@ -121,7 +121,7 @@ for tq-edge's config.
   `--perm 'write:*/stop'` gets STOP and its Space stop is acked, a plain
   viewer gets none.
 
-- tq-app's editor (branch `tq-app-editor`), live against
+- tq-app's editor (PR #10), live against
   `CONFIG=config/edge.full.example.json dev/run-local.sh`: overlays over
   every widget with both videos still playing underneath; dragging a plot
   onto a pinned lock (it settles under it, the rest make room; the file
@@ -179,6 +179,9 @@ console key handling.
 - tq-app's "Held by" badges show a bare session id.
 - Relay replay of `.events` on subscribe is by design; both consoles now
   log those lines at the time they happened.
+- `--layout FILE` saves edits back into FILE, so running tq-app with
+  `--layout config/layout.example.json` and moving a widget rewrites the
+  example; copy it first, or `git checkout` it afterwards.
 - Testing tips: tq-app's window cannot be resized from AppleScript or by
   dragging its edge with CGEvent; to see narrow mode, build once with
   `NARROW` in `ui/board.rs` raised. Run it with `HOME=/tmp/…` to test the
@@ -193,6 +196,13 @@ console key handling.
   (WebTransport and HEVC work); keep that script outside the repo.
   `tq-relay --secret … token --preset viewer --perm 'write:*/stop'` mints
   tokens with extra permissions.
+
+**Releasing** ([install.md](install.md#releasing)): `dev/release.sh bump
+<edge|relay|app|web> X.Y.Z`, commit, merge to `main`, then tag `main`
+(`relay-vX.Y.Z` and so on) and push the tag; each tag runs its workflow.
+The web app deploys to Cloudflare on every push to `main` that touches
+`web/`, so a protocol major change needs the GCP relay upgraded at the
+same time (`infra/gcp/README.md`, "Upgrade the relay").
 
 **Next:** layouts per
 room on the relay so both consoles share them, a `map` widget. The TS client

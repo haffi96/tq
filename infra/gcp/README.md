@@ -31,8 +31,8 @@ works as well as `https://tq.haffi.dev/?room=…`.
 - A Cloudflare API token on `haffi.dev` with **Zone → Zone → Read** and
   **Zone → DNS → Edit**. Terraform needs Read to look the zone up by name, and
   Edit to create the A record. certbot on the VM uses it for DNS-01.
-- The relay image: `ghcr.io/haffi96/tq-relay:0.2.0` (or newer). It needs
-  `--http-tls` and `--cors-origins`.
+- The relay image: `ghcr.io/haffi96/tq-relay:0.4.0` (or newer), protocol
+  3.0, which tq-edge 0.1.0, tq-app 0.5.0 and the web app 0.3.0 speak.
 
 ## State
 
@@ -105,13 +105,13 @@ For a test feed from this machine, `dev/publish-gcp.sh` runs the two test
 sources (H.264 and H.265) and tq-edge using `config/edge.gcp.json`.
 It reads the secret from the Terraform state.
 
-tq-app (0.3.0 or newer) settings file:
+tq-app (0.5.0 or newer) settings file:
 
 ```json
 {
   "relay_http": "https://tq-relay-1.haffi.dev",
   "room": "robot-01",
-  "role": "operator",
+  "preset": "operator",
   "secret": "<terraform output -raw shared_secret>"
 }
 ```

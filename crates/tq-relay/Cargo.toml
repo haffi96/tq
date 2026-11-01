@@ -2,7 +2,7 @@
 name = "tq-relay"
 description = "The relay: one WebTransport endpoint for every session; routes broadcasts, tracks, channels and locks between them"
 # Released on its own: tags `relay-vX.Y.Z` (see docs/install.md).
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 publish.workspace = true
 build = "../../build/version.rs"
