@@ -50,6 +50,21 @@ struct Args {
     /// its ack: `--send rover/lights='{"on":true}'`. Repeatable.
     #[arg(long, value_name = "BROADCAST/CHANNEL=JSON")]
     send: Vec<String>,
+    /// Every clock is this machine's (owner, relay and probe on one
+    /// host), so raw timestamp differences are exact: report how far the
+    /// offset-corrected numbers are from them, against the error bound
+    /// the clock sync claims (`clock_check` in the JSON).
+    #[arg(long)]
+    same_host: bool,
+    /// Leave each track's first this-many seconds out of the latency
+    /// numbers (the join: catch-up frames from the cached group), so they
+    /// show the steady state. The join has its own numbers.
+    #[arg(long, default_value_t = 0.0)]
+    warmup: f64,
+    /// A frame is live once its capture→probe is at most this (ms); the
+    /// join's `live_ms` is how long after subscribing the first one came.
+    #[arg(long, default_value_t = 100.0)]
+    live_threshold_ms: f64,
     /// Claim this protocol (`MAJOR.MINOR`) in the hello, to test the
     /// relay's version checks.
     #[arg(long, hide = true)]
@@ -89,8 +104,21 @@ struct TrackStats {
     bytes: u64,
     codec: String,
     capture_to_probe: Samples,
+    capture_to_publisher: Samples,
     publisher_to_relay: Samples,
     relay_to_probe: Samples,
+    /// `--same-host`: corrected − raw capture→probe, ms, and whether it
+    /// was within the claimed error bound.
+    clock_error: Samples,
+    clock_bound: Samples,
+    clock_within: u64,
+    /// Subscribe → first frame, and → first live frame, ms.
+    first_frame_ms: Option<f64>,
+    first_frame_at: Option<Instant>,
+    live_ms: Option<f64>,
+    /// Steady-state frames with capture→probe over 50 / 100 ms.
+    over_50ms: u64,
+    over_100ms: u64,
 }
 
 #[derive(Default)]
@@ -100,6 +128,8 @@ struct Shared {
     heartbeat_rtt: Samples,
     acks: HashMap<String, u64>,
     tripped: Option<bool>,
+    /// `--send` messages: channel, ack status, round trip.
+    sends: Vec<serde_json::Value>,
 }
 
 #[tokio::main]
@@ -151,12 +181,17 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     // Every track, as it appears.
-    tokio::spawn(subscribe_all(session.clone(), args.broadcast.clone(), shared.clone()));
+    let opts = ReadOpts {
+        same_host: args.same_host,
+        warmup: Duration::from_secs_f64(args.warmup),
+        live_threshold_ms: args.live_threshold_ms,
+    };
+    tokio::spawn(subscribe_all(session.clone(), args.broadcast.clone(), opts, shared.clone()));
     for s in &args.send {
         let (channel, body) = s.split_once('=').context("--send BROADCAST/CHANNEL=JSON")?;
         let channel: Path = channel.parse().map_err(|e| anyhow::anyhow!("--send {channel}: {e}"))?;
         let body: serde_json::Value = serde_json::from_str(body).context("--send: the message is not JSON")?;
-        tokio::spawn(send_once(session.clone(), channel, body));
+        tokio::spawn(send_once(session.clone(), channel, body, shared.clone()));
     }
     if args.teleop_hz > 0.0 {
         tokio::spawn(teleop(session.clone(), args.broadcast.clone(), args.teleop_hz, shared.clone()));
@@ -196,11 +231,35 @@ async fn main() -> anyhow::Result<()> {
                 path.to_string(),
                 serde_json::json!({
                     "kind": t.kind, "codec": t.codec, "frames": t.frames, "groups": t.groups.len(),
-                    "fps": (t.frames as f64 / secs * 10.0).round() / 10.0,
+                    // From the first frame: the join is not a gap in the rate.
+                    "fps": t.first_frame_at.map_or(0.0, |at| {
+                        (t.frames.saturating_sub(1) as f64 / at.elapsed().as_secs_f64() * 10.0).round() / 10.0
+                    }),
                     "kbps": (t.bytes as f64 * 8.0 / 1000.0 / secs).round(),
                     "capture_to_probe_ms": t.capture_to_probe.summary(),
+                    "capture_to_publisher_ms": t.capture_to_publisher.summary(),
                     "publisher_to_relay_ms": t.publisher_to_relay.summary(),
                     "relay_to_probe_ms": t.relay_to_probe.summary(),
+                    "over_50ms": t.over_50ms,
+                    "over_100ms": t.over_100ms,
+                    "join": { "first_frame_ms": t.first_frame_ms, "live_ms": t.live_ms },
+                }),
+            )
+        })
+        .collect();
+    let clock_check: serde_json::Map<String, serde_json::Value> = s
+        .tracks
+        .iter()
+        .filter(|(_, t)| !t.clock_error.0.is_empty())
+        .map(|(path, t)| {
+            let abs = Samples(t.clock_error.0.iter().map(|e| e.abs()).collect());
+            (
+                path.to_string(),
+                serde_json::json!({
+                    "error_ms": t.clock_error.summary(),
+                    "abs_error_ms": abs.summary(),
+                    "claimed_bound_ms": t.clock_bound.summary(),
+                    "within_bound": (t.clock_within as f64 / t.clock_error.0.len() as f64 * 1000.0).round() / 1000.0,
                 }),
             )
         })
@@ -212,6 +271,9 @@ async fn main() -> anyhow::Result<()> {
         "acks": s.acks,
         "deadman_tripped": s.tripped,
         "relay_offset_us": session.relay_offset().map(|o| o.offset_us),
+        "relay_offset_error_us": session.relay_offset().map(|o| o.error_us),
+        "sends": s.sends,
+        "clock_check": if args.same_host { serde_json::Value::Object(clock_check) } else { serde_json::Value::Null },
         "quic": tq_transport::quic::quic_stats(session.transport()),
     });
     if args.json {
@@ -236,7 +298,14 @@ async fn next<T: Clone>(rx: &mut tokio::sync::broadcast::Receiver<T>) -> Option<
 
 /// Subscribes to each track once it is in the room; a failed one is
 /// tried again on the next room update.
-async fn subscribe_all(session: Session, only: Option<String>, shared: Arc<Mutex<Shared>>) {
+#[derive(Clone, Copy)]
+struct ReadOpts {
+    same_host: bool,
+    warmup: Duration,
+    live_threshold_ms: f64,
+}
+
+async fn subscribe_all(session: Session, only: Option<String>, opts: ReadOpts, shared: Arc<Mutex<Shared>>) {
     let mut room = session.room();
     let seen = Arc::new(Mutex::new(HashSet::new()));
     loop {
@@ -251,7 +320,7 @@ async fn subscribe_all(session: Session, only: Option<String>, shared: Arc<Mutex
             if seen.lock().unwrap().insert(path.clone()) {
                 let (session, shared, seen) = (session.clone(), shared.clone(), seen.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = read_track(session, path.clone(), kind, shared).await {
+                    if let Err(e) = read_track(session, path.clone(), kind, opts, shared).await {
                         tracing::warn!(track = %path, error = format!("{e:#}"), "subscription failed");
                         seen.lock().unwrap().remove(&path);
                     }
@@ -264,7 +333,14 @@ async fn subscribe_all(session: Session, only: Option<String>, shared: Arc<Mutex
     }
 }
 
-async fn read_track(session: Session, path: Path, kind: TrackKind, shared: Arc<Mutex<Shared>>) -> anyhow::Result<()> {
+async fn read_track(
+    session: Session,
+    path: Path,
+    kind: TrackKind,
+    opts: ReadOpts,
+    shared: Arc<Mutex<Shared>>,
+) -> anyhow::Result<()> {
+    let subscribed = Instant::now();
     let mut reader = session.subscribe(path.clone()).await?;
     tracing::info!(track = %path, "subscribed");
     while let Some(f) = reader.recv().await {
@@ -278,6 +354,19 @@ async fn read_track(session: Session, path: Path, kind: TrackKind, shared: Arc<M
         if t.codec != *f.codec {
             t.codec = f.codec.to_string();
         }
+        // Video capture times are only real with the encoder's SEI.
+        let has_capture = kind == TrackKind::Data || f.header.flags & FLAG_CAPTURE_FROM_SEI != 0;
+        let since_ms = subscribed.elapsed().as_secs_f64() * 1000.0;
+        t.first_frame_ms.get_or_insert(since_ms);
+        t.first_frame_at.get_or_insert_with(Instant::now);
+        if let (true, None, Some(ms)) = (has_capture, t.live_ms, hops.capture_to_here_ms) {
+            if ms <= opts.live_threshold_ms {
+                t.live_ms = Some(since_ms);
+            }
+        }
+        if subscribed.elapsed() < opts.warmup {
+            continue;
+        }
         // Until the clocks are measured, just after connecting, the
         // cross-machine numbers are unknown and left out.
         if let Some(ms) = hops.publisher_to_relay_ms {
@@ -286,10 +375,20 @@ async fn read_track(session: Session, path: Path, kind: TrackKind, shared: Arc<M
         if let Some(ms) = hops.relay_to_here_ms {
             t.relay_to_probe.add(ms);
         }
-        // Video capture times are only real with the encoder's SEI.
-        if kind == TrackKind::Data || f.header.flags & FLAG_CAPTURE_FROM_SEI != 0 {
+        if has_capture {
+            t.capture_to_publisher.add(hops.capture_to_publisher_ms);
             if let Some(ms) = hops.capture_to_here_ms {
                 t.capture_to_probe.add(ms);
+                t.over_50ms += u64::from(ms > 50.0);
+                t.over_100ms += u64::from(ms > 100.0);
+                if let (true, Some(bound_us)) = (opts.same_host, f.clocks.error_us()) {
+                    let raw = (f.recv_us as f64 - f.header.capture_us as f64) / 1000.0;
+                    let error = ms - raw;
+                    let bound = bound_us as f64 / 1000.0;
+                    t.clock_error.add(error);
+                    t.clock_bound.add(bound);
+                    t.clock_within += u64::from(error.abs() <= bound);
+                }
             }
         }
     }
@@ -297,7 +396,7 @@ async fn read_track(session: Session, path: Path, kind: TrackKind, shared: Arc<M
 }
 
 /// Sends `body` on `channel` once the channel is in the room; logs the ack.
-async fn send_once(session: Session, channel: Path, body: serde_json::Value) {
+async fn send_once(session: Session, channel: Path, body: serde_json::Value, shared: Arc<Mutex<Shared>>) {
     let mut room = session.room();
     let _ = room
         .wait_for(|r| r.broadcast(&channel.broadcast).is_some_and(|b| b.channel(&channel.name).is_some()))
@@ -309,9 +408,9 @@ async fn send_once(session: Session, channel: Path, body: serde_json::Value) {
     };
     let ack = tokio::time::timeout(Duration::from_secs(3), async {
         while let Some(r) = next(&mut replies).await {
-            if let Reply::Ack { channel: c, seq: s, status, detail, .. } = r {
+            if let Reply::Ack { channel: c, seq: s, status, detail, rtt_us, .. } = r {
                 if c == channel && s == seq {
-                    return Some((status, detail));
+                    return Some((status, detail, rtt_us));
                 }
             }
         }
@@ -319,8 +418,16 @@ async fn send_once(session: Session, channel: Path, body: serde_json::Value) {
     })
     .await;
     match ack {
-        Ok(Some((status, detail))) => tracing::info!(%channel, ?status, %detail, "sent"),
-        _ => tracing::warn!(%channel, "sent, no ack"),
+        Ok(Some((status, detail, rtt_us))) => {
+            tracing::info!(%channel, ?status, %detail, rtt_ms = rtt_us as f64 / 1000.0, "sent");
+            shared.lock().unwrap().sends.push(serde_json::json!({
+                "channel": channel.to_string(), "status": format!("{status:?}"), "rtt_ms": rtt_us as f64 / 1000.0,
+            }));
+        }
+        _ => {
+            tracing::warn!(%channel, "sent, no ack");
+            shared.lock().unwrap().sends.push(serde_json::json!({ "channel": channel.to_string(), "status": "no_ack" }));
+        }
     }
 }
 
