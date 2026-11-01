@@ -1,7 +1,7 @@
 //! The window: a dock console. Title bar on top (with the remote stop),
 //! the board (the layout's widgets, [`board`]) in the middle with the
 //! events panel under it, a resizable sidebar with latency and link on the
-//! right, a status bar below.
+//! right (the layout [`editor`] while editing), a status bar below.
 //!
 //! Every part is a cached view. A decoded picture notifies only its video
 //! widgets, so a video frame re-renders one tile and replays the rest; data
@@ -11,6 +11,7 @@
 //! size.
 
 mod board;
+mod editor;
 mod model;
 mod panels;
 mod tile;
@@ -31,7 +32,7 @@ use gpui_kit::{
     px, AnyView, Context, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, StyleRefinement, Window,
 };
 
-use self::{board::Board, model::Model, panels::*};
+use self::{board::Board, editor::Editor, model::Model, panels::*};
 use crate::{
     layout::Layout,
     session::{Event, Shared},
@@ -46,6 +47,7 @@ pub struct AppView {
     header: Entity<Header>,
     board: Entity<Board>,
     sidebar: Entity<Sidebar>,
+    editor: Entity<Editor>,
     events: Entity<Events>,
     status: Entity<Status>,
     /// Render start -> the last element painted, per window frame.
@@ -59,18 +61,20 @@ impl AppView {
         mut events: UnboundedReceiver<Event>,
         updates: update::Settings,
         layout: Option<Layout>,
+        store: Option<crate::layout::Store>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let model = cx.new(|_| Model::new(shared, updates, layout));
+        let model = cx.new(|_| Model::new(shared, updates, layout, store));
         model.update(cx, |m, cx| m.check_update(cx));
         let view = Self {
             focus,
             header: cx.new(|cx| Header::new(model.clone(), cx)),
             board: cx.new(|cx| Board::new(model.clone(), cx)),
             sidebar: cx.new(|cx| Sidebar::new(model.clone(), cx)),
+            editor: cx.new(|cx| Editor::new(model.clone(), cx)),
             events: cx.new(|cx| Events::new(model.clone(), cx)),
             status: cx.new(|cx| Status::new(model.clone(), cx)),
             model,
@@ -145,8 +149,12 @@ impl AppView {
         }
     }
 
-    fn on_key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.model.read(cx).operator() || e.keystroke.modifiers.platform || e.keystroke.modifiers.control {
+            return;
+        }
+        // Typing in the editor's fields does not drive.
+        if self.editor.read(cx).has_focus(window, cx) {
             return;
         }
         let key = match e.keystroke.key.as_str() {
@@ -178,9 +186,14 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_start.set(Some(Instant::now()));
-        let (sidebar, bottom) = {
+        let (sidebar, bottom, editing) = {
             let m = self.model.read(cx);
-            (m.sidebar, m.bottom)
+            (m.sidebar, m.bottom, m.editing)
+        };
+        let right = if editing {
+            AnyView::from(self.editor.clone())
+        } else {
+            AnyView::from(self.sidebar.clone())
         };
         let fill = || StyleRefinement::default().size_full();
         let (start, cost) = (self.frame_start.clone(), self.frame_cost.clone());
@@ -215,8 +228,8 @@ impl Render for AppView {
                             resizable_panel()
                                 .size(px(340.))
                                 .size_range(px(260.)..px(560.))
-                                .visible(sidebar)
-                                .child(AnyView::from(self.sidebar.clone()).cached(fill())),
+                                .visible(sidebar || editing)
+                                .child(right.cached(fill())),
                         ),
                 ),
             )

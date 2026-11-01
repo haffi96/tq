@@ -64,6 +64,12 @@ pub fn default_path() -> Option<PathBuf> {
     Some(base.join("tq-app/config.json"))
 }
 
+/// Where layouts edited in the app are kept: `layouts/` next to the
+/// settings file.
+pub fn layouts_dir() -> Option<PathBuf> {
+    Some(default_path()?.parent()?.join("layouts"))
+}
+
 impl File {
     /// `path`, or the default location; a missing default file is fine.
     pub fn load(path: Option<&Path>) -> anyhow::Result<Self> {

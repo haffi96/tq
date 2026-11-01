@@ -9,7 +9,9 @@
 //! ```
 //!
 //! It shows a layout of widgets (docs/layout-1.md): `--layout` (or the
-//! settings file's `layout`), else a preset made from the room.
+//! settings file's `layout`), else the one last edited in the app for the
+//! room and preset, else a preset made from the room. The editor (the
+//! title bar's pencil) saves to where the layout came from.
 //!
 //! Started without flags (from Finder, or a desktop launcher) it reads its
 //! settings file ([`config`]); flags override the file.
@@ -32,7 +34,6 @@ mod vt;
 
 use std::path::PathBuf;
 
-use anyhow::Context as _;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use gpui_kit::{
     actions,
@@ -70,7 +71,7 @@ struct Args {
     #[arg(long, env = "TQ_SHARED_SECRET", hide_env_values = true)]
     secret: Option<String>,
     /// A layout (docs/layout-1.md) to show instead of the preset made from
-    /// the room.
+    /// the room. Edits made in the app are saved back to it.
     #[arg(long)]
     layout: Option<PathBuf>,
     /// Also log each video track's numbers every 2 s (headless checks).
@@ -127,13 +128,20 @@ fn main() -> anyhow::Result<()> {
         log_stats: args.log_stats,
         build,
     };
-    let layout = match args.layout.or(file.layout) {
-        Some(path) => {
-            let json = std::fs::read_to_string(&path).with_context(|| format!("{}", path.display()))?;
-            let layout =
-                layout::Layout::parse(&json).map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e.join("; ")))?;
-            Some(layout)
+    // The layout: the given file, else the one saved for this room and
+    // preset, else (`None`) the preset made from the room. Edits are saved
+    // to where it came from.
+    let store = match args.layout.or(file.layout) {
+        Some(path) => Some(layout::Store { path, given: true }),
+        None => config::layouts_dir().map(|dir| layout::Store::for_room(dir, &config.room, &config.preset)),
+    };
+    let layout = match store.as_ref().map(|s| (s, s.load())) {
+        Some((s, Err(e))) if s.given => anyhow::bail!("{}: {e}", s.path.display()),
+        Some((s, Err(e))) => {
+            tracing::warn!("saved layout {} ignored: {e}", s.path.display());
+            None
         }
+        Some((_, Ok(l))) => l,
         None => None,
     };
     let title = format!("tq · {} · {}", config.room, config.preset);
@@ -164,7 +172,7 @@ fn main() -> anyhow::Result<()> {
                     window
                         .observe_window_appearance(|window, cx| Theme::sync_system_appearance(Some(window), cx))
                         .detach();
-                    cx.new(|cx| ui::AppView::new(shared, events_rx, updates, layout, window, cx))
+                    cx.new(|cx| ui::AppView::new(shared, events_rx, updates, layout, store, window, cx))
                 },
             )
             .expect("open window");
