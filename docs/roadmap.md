@@ -41,9 +41,11 @@ Updated 2026-11-01. Everything is merged to `main`: PR #9
 layout editor) squashed into it first. Released from `main`: **relay
 0.4.0** (`relay-v0.4.0`, web app 0.3.0 inside), **tq-edge 0.1.0**
 (`edge-v0.1.0`, its first release; it replaces tq-publisher) and **tq-app
-0.5.0** (`app-v0.5.0`). The relay on GCP (`tq-relay-1.haffi.dev`) runs
-0.4.0 and the web app at `tq.haffi.dev` is 0.3.0, so the hosted stack is
-all protocol 3.0. Start new work on a branch from `main`.
+0.5.0** (`app-v0.5.0`). The GCP relay VM (`tq-relay-1`) is set to the
+0.4.0 image (applied) but is **stopped** to save money; start it with
+`gcloud compute instances start tq-relay-1 --zone europe-west2-b` and it
+runs 0.4.0. The web app at `tq.haffi.dev` is already 0.3.0 (protocol 3.0)
+and cannot connect while the VM is stopped. Start new work on a branch from `main`.
 Phase 1 is done; Phase 2's Rust half is done, tq-edge and the "about 10
 lines" SDK goal included. Phase 3: both consoles render layouts
 ([layout-1.md](layout-1.md)) and edit them (see below). Start with [protocol-3.md](protocol-3.md) for the wire
