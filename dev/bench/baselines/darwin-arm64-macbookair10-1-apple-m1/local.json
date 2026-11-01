@@ -1,0 +1,1495 @@
+{
+  "bench": 1,
+  "label": "692d627",
+  "commit": "692d627",
+  "protocol": "3",
+  "relay": "local",
+  "machine": "Darwin arm64 MacBookAir10,1 Apple M1",
+  "started": "2026-11-01T10:27:29.378Z",
+  "quick": false,
+  "scenarios": {
+    "video-direct": {
+      "name": "video-direct",
+      "what": "H.264 + H.265 720p30, no impairment, operator driving at 20 Hz",
+      "secs": 30,
+      "tracks": {
+        "robot-01/front": {
+          "codec": "avc1.42001f",
+          "fps": 30,
+          "kbps": 718,
+          "capture_to_probe_ms": {
+            "p50": 17.3,
+            "p95": 20.1,
+            "max": 21.2,
+            "n": 930
+          },
+          "capture_to_pub_ms": {
+            "p50": 16.6,
+            "p95": 19.3,
+            "max": 20.2,
+            "n": 930
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.3,
+            "p95": 0.4,
+            "max": 0.6,
+            "n": 930
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.4,
+            "p95": 0.6,
+            "max": 1.1,
+            "n": 930
+          },
+          "over_50ms": 0,
+          "over_100ms": 0
+        },
+        "robot-01/rear": {
+          "codec": "hev1.1.6.L93.B0",
+          "fps": 30,
+          "kbps": 377,
+          "capture_to_probe_ms": {
+            "p50": 17.3,
+            "p95": 19.9,
+            "max": 21.6,
+            "n": 930
+          },
+          "capture_to_pub_ms": {
+            "p50": 16.7,
+            "p95": 19.2,
+            "max": 20.7,
+            "n": 930
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.2,
+            "p95": 0.3,
+            "max": 0.5,
+            "n": 930
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.3,
+            "p95": 0.5,
+            "max": 0.8,
+            "n": 930
+          },
+          "over_50ms": 0,
+          "over_100ms": 0
+        }
+      },
+      "teleop": {
+        "ack_rtt_ms": {
+          "p50": 0.6,
+          "p95": 1,
+          "max": 1.3,
+          "n": 680
+        },
+        "heartbeat_rtt_ms": {
+          "p50": 0.7,
+          "p95": 1,
+          "max": 1.5,
+          "n": 340
+        },
+        "acks": {
+          "Ok": 680
+        },
+        "tripped_at_end": false
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.3,
+            "mean": 0.3,
+            "n": 31,
+            "p50": 0.3,
+            "p95": 0.3
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/front": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.3,
+            "mean": 0.3,
+            "n": 930,
+            "p50": 0.3,
+            "p95": 0.3
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/rear": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.3,
+            "mean": 0.3,
+            "n": 930,
+            "p50": 0.3,
+            "p95": 0.3
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        }
+      },
+      "quic": {
+        "congestion_events": 0,
+        "cwnd": 353381,
+        "lost_packets": 0,
+        "rtt_ms": 0.227651,
+        "sent_packets": 3717
+      },
+      "cpu_pct": {
+        "relay": 1.5,
+        "edge": 1
+      }
+    },
+    "video-starlink": {
+      "name": "video-starlink",
+      "what": "as video-direct, robot uplink through the starlink profile",
+      "secs": 45,
+      "tracks": {
+        "robot-01/front": {
+          "codec": "avc1.42001f",
+          "fps": 29.8,
+          "kbps": 625,
+          "capture_to_probe_ms": {
+            "p50": 45.3,
+            "p95": 57.9,
+            "max": 252.3,
+            "n": 1340
+          },
+          "capture_to_pub_ms": {
+            "p50": 14.9,
+            "p95": 18.1,
+            "max": 20,
+            "n": 1340
+          },
+          "pub_to_relay_ms": {
+            "p50": 30.8,
+            "p95": 43.2,
+            "max": 240.3,
+            "n": 1340
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.3,
+            "p95": 0.4,
+            "max": 0.7,
+            "n": 1340
+          },
+          "over_50ms": 284,
+          "over_100ms": 10
+        },
+        "robot-01/rear": {
+          "codec": "hev1.1.6.L93.B0",
+          "fps": 30,
+          "kbps": 372,
+          "capture_to_probe_ms": {
+            "p50": 42.7,
+            "p95": 56.6,
+            "max": 240,
+            "n": 1351
+          },
+          "capture_to_pub_ms": {
+            "p50": 14.3,
+            "p95": 18.6,
+            "max": 20.6,
+            "n": 1351
+          },
+          "pub_to_relay_ms": {
+            "p50": 29,
+            "p95": 42,
+            "max": 222.7,
+            "n": 1351
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.3,
+            "p95": 0.4,
+            "max": 0.9,
+            "n": 1351
+          },
+          "over_50ms": 208,
+          "over_100ms": 10
+        }
+      },
+      "teleop": {
+        "ack_rtt_ms": {
+          "p50": 58.3,
+          "p95": 68,
+          "max": 146.3,
+          "n": 948
+        },
+        "heartbeat_rtt_ms": {
+          "p50": 58.4,
+          "p95": 68.2,
+          "max": 146.2,
+          "n": 477
+        },
+        "acks": {
+          "Ok": 948
+        },
+        "tripped_at_end": false
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 8.2,
+            "mean": 3,
+            "n": 45,
+            "p50": 2.6,
+            "p95": 8.2
+          },
+          "claimed_bound_ms": {
+            "max": 26.9,
+            "mean": 24.1,
+            "n": 45,
+            "p50": 24.9,
+            "p95": 26.3
+          },
+          "error_ms": {
+            "max": 8.2,
+            "mean": -0.8,
+            "n": 45,
+            "p50": -2.5,
+            "p95": 8.2
+          },
+          "within_bound": 1
+        },
+        "robot-01/front": {
+          "abs_error_ms": {
+            "max": 8.2,
+            "mean": 3,
+            "n": 1340,
+            "p50": 2.6,
+            "p95": 8.2
+          },
+          "claimed_bound_ms": {
+            "max": 26.9,
+            "mean": 24.1,
+            "n": 1340,
+            "p50": 24.9,
+            "p95": 26.3
+          },
+          "error_ms": {
+            "max": 8.2,
+            "mean": -0.9,
+            "n": 1340,
+            "p50": -2.5,
+            "p95": 8.2
+          },
+          "within_bound": 1
+        },
+        "robot-01/rear": {
+          "abs_error_ms": {
+            "max": 8.2,
+            "mean": 3,
+            "n": 1351,
+            "p50": 2.6,
+            "p95": 8.2
+          },
+          "claimed_bound_ms": {
+            "max": 26.9,
+            "mean": 24.1,
+            "n": 1351,
+            "p50": 24.9,
+            "p95": 26.3
+          },
+          "error_ms": {
+            "max": 8.2,
+            "mean": -0.8,
+            "n": 1351,
+            "p50": -2.5,
+            "p95": 8.2
+          },
+          "within_bound": 1
+        }
+      },
+      "quic": {
+        "congestion_events": 0,
+        "cwnd": 397166,
+        "lost_packets": 0,
+        "rtt_ms": 0.24992599999999998,
+        "sent_packets": 4861
+      },
+      "cpu_pct": {
+        "relay": 1.3,
+        "edge": 1
+      }
+    },
+    "prodlike-direct": {
+      "name": "prodlike-direct",
+      "what": "one H.265 720p10 2 Mbps camera (snow), length-prefixed",
+      "secs": 30,
+      "tracks": {
+        "robot-01/front": {
+          "codec": "hev1.1.6.L93.B0",
+          "fps": 10,
+          "kbps": 1722,
+          "capture_to_probe_ms": {
+            "p50": 25.4,
+            "p95": 28,
+            "max": 29.5,
+            "n": 310
+          },
+          "capture_to_pub_ms": {
+            "p50": 23.6,
+            "p95": 25.6,
+            "max": 26.2,
+            "n": 310
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.6,
+            "p95": 1.7,
+            "max": 3.4,
+            "n": 310
+          },
+          "relay_to_probe_ms": {
+            "p50": 1,
+            "p95": 1.8,
+            "max": 3.4,
+            "n": 310
+          },
+          "over_50ms": 0,
+          "over_100ms": 0
+        }
+      },
+      "teleop": {
+        "ack_rtt_ms": {
+          "p50": 1.2,
+          "p95": 1.9,
+          "max": 2.4,
+          "n": 680
+        },
+        "heartbeat_rtt_ms": {
+          "p50": 0.9,
+          "p95": 1.5,
+          "max": 1.8,
+          "n": 340
+        },
+        "acks": {
+          "Ok": 680
+        },
+        "tripped_at_end": false
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 31,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/front": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 310,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 310,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 310,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        }
+      },
+      "quic": {
+        "congestion_events": 0,
+        "cwnd": 355173,
+        "lost_packets": 0,
+        "rtt_ms": 0.43347399999999997,
+        "sent_packets": 4294
+      },
+      "cpu_pct": {
+        "relay": 1.8,
+        "edge": 1.3
+      }
+    },
+    "prodlike-starlink": {
+      "name": "prodlike-starlink",
+      "what": "prodlike through starlink",
+      "secs": 45,
+      "tracks": {
+        "robot-01/front": {
+          "codec": "hev1.1.6.L93.B0",
+          "fps": 10,
+          "kbps": 1801,
+          "capture_to_probe_ms": {
+            "p50": 69.5,
+            "p95": 131.9,
+            "max": 184.6,
+            "n": 449
+          },
+          "capture_to_pub_ms": {
+            "p50": 23.3,
+            "p95": 25.1,
+            "max": 25.8,
+            "n": 449
+          },
+          "pub_to_relay_ms": {
+            "p50": 45.7,
+            "p95": 107.9,
+            "max": 158.2,
+            "n": 449
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.7,
+            "p95": 2.4,
+            "max": 15,
+            "n": 449
+          },
+          "over_50ms": 444,
+          "over_100ms": 67
+        }
+      },
+      "teleop": {
+        "ack_rtt_ms": {
+          "p50": 59.2,
+          "p95": 86.6,
+          "max": 151.2,
+          "n": 947
+        },
+        "heartbeat_rtt_ms": {
+          "p50": 58.9,
+          "p95": 84.5,
+          "max": 147.8,
+          "n": 473
+        },
+        "acks": {
+          "Ok": 947
+        },
+        "tripped_at_end": false
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 5.9,
+            "mean": 2.3,
+            "n": 45,
+            "p50": 1.7,
+            "p95": 5.9
+          },
+          "claimed_bound_ms": {
+            "max": 28.4,
+            "mean": 23.9,
+            "n": 45,
+            "p50": 23.5,
+            "p95": 27.6
+          },
+          "error_ms": {
+            "max": 4.3,
+            "mean": 0.5,
+            "n": 45,
+            "p50": -0.1,
+            "p95": 4.2
+          },
+          "within_bound": 1
+        },
+        "robot-01/front": {
+          "abs_error_ms": {
+            "max": 5.9,
+            "mean": 2.3,
+            "n": 449,
+            "p50": 1.7,
+            "p95": 5.9
+          },
+          "claimed_bound_ms": {
+            "max": 28.4,
+            "mean": 23.9,
+            "n": 449,
+            "p50": 23.5,
+            "p95": 27.6
+          },
+          "error_ms": {
+            "max": 4.3,
+            "mean": 0.6,
+            "n": 449,
+            "p50": -0.1,
+            "p95": 4.2
+          },
+          "within_bound": 1
+        }
+      },
+      "quic": {
+        "congestion_events": 0,
+        "cwnd": 401282,
+        "lost_packets": 0,
+        "rtt_ms": 0.405763,
+        "sent_packets": 5558
+      },
+      "cpu_pct": {
+        "relay": 2.2,
+        "edge": 1.3
+      }
+    },
+    "prodlike-starlink-bad": {
+      "name": "prodlike-starlink-bad",
+      "what": "prodlike through starlink-bad",
+      "secs": 45,
+      "tracks": {
+        "robot-01/front": {
+          "codec": "hev1.1.6.L93.B0",
+          "fps": 9.7,
+          "kbps": 1766,
+          "capture_to_probe_ms": {
+            "p50": 114.3,
+            "p95": 272.5,
+            "max": 518.1,
+            "n": 438
+          },
+          "capture_to_pub_ms": {
+            "p50": 23.2,
+            "p95": 24.6,
+            "max": 25.7,
+            "n": 438
+          },
+          "pub_to_relay_ms": {
+            "p50": 89.7,
+            "p95": 248.5,
+            "max": 495.7,
+            "n": 438
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.9,
+            "p95": 3.5,
+            "max": 5.7,
+            "n": 438
+          },
+          "over_50ms": 438,
+          "over_100ms": 325
+        }
+      },
+      "teleop": {
+        "ack_rtt_ms": {
+          "p50": 99.6,
+          "p95": 218.8,
+          "max": 389.8,
+          "n": 911
+        },
+        "heartbeat_rtt_ms": {
+          "p50": 87.1,
+          "p95": 202.1,
+          "max": 376.6,
+          "n": 452
+        },
+        "acks": {
+          "Ok": 911
+        },
+        "tripped_at_end": false
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 11.4,
+            "mean": 4.8,
+            "n": 45,
+            "p50": 4.9,
+            "p95": 7.6
+          },
+          "claimed_bound_ms": {
+            "max": 38.1,
+            "mean": 34.6,
+            "n": 45,
+            "p50": 35.2,
+            "p95": 38.1
+          },
+          "error_ms": {
+            "max": 6.4,
+            "mean": 2.8,
+            "n": 45,
+            "p50": 3.6,
+            "p95": 6.4
+          },
+          "within_bound": 1
+        },
+        "robot-01/front": {
+          "abs_error_ms": {
+            "max": 11.4,
+            "mean": 4.7,
+            "n": 438,
+            "p50": 4.9,
+            "p95": 7.6
+          },
+          "claimed_bound_ms": {
+            "max": 38.1,
+            "mean": 34.4,
+            "n": 438,
+            "p50": 35.2,
+            "p95": 38.1
+          },
+          "error_ms": {
+            "max": 6.4,
+            "mean": 3,
+            "n": 438,
+            "p50": 3.6,
+            "p95": 6.4
+          },
+          "within_bound": 1
+        }
+      },
+      "quic": {
+        "congestion_events": 0,
+        "cwnd": 402618,
+        "lost_packets": 0,
+        "rtt_ms": 0.829978,
+        "sent_packets": 5573
+      },
+      "cpu_pct": {
+        "relay": 2.4,
+        "edge": 1.3
+      }
+    },
+    "stop": {
+      "name": "stop",
+      "what": "remote stop: 10 fresh operator sessions, each sends a stop (resent every 50 ms until acked) and times the ack",
+      "secs": 40,
+      "stop_ack_rtt_ms": {
+        "n": 10,
+        "mean": 1.7,
+        "p50": 2,
+        "p95": 2.8,
+        "max": 2.8
+      },
+      "statuses": {
+        "Ok": 10
+      },
+      "sends_per_stop": {
+        "n": 10,
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "cpu_pct": {
+        "relay": 1.1,
+        "edge": 0.8
+      }
+    },
+    "stop-starlink": {
+      "name": "stop-starlink",
+      "what": "remote stop through starlink",
+      "secs": 40,
+      "stop_ack_rtt_ms": {
+        "n": 10,
+        "mean": 73.7,
+        "p50": 69.4,
+        "p95": 105.4,
+        "max": 105.4
+      },
+      "statuses": {
+        "Ok": 10
+      },
+      "sends_per_stop": {
+        "n": 10,
+        "mean": 2.1,
+        "p50": 2,
+        "p95": 3,
+        "max": 3
+      },
+      "cpu_pct": {
+        "relay": 1.3,
+        "edge": 0.7
+      }
+    },
+    "data": {
+      "name": "data",
+      "what": "data tracks: latest 50 Hz, stream 100 Hz, datagram 200 Hz, ~200 B JSON",
+      "secs": 20,
+      "tracks": {
+        "robot-01/data-datagram": {
+          "expect_hz": 200,
+          "fps": 199.9,
+          "edge_to_probe_ms": {
+            "p50": 0.5,
+            "p95": 0.8,
+            "max": 2.1,
+            "n": 3400
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.3,
+            "p95": 0.4,
+            "max": 1.9,
+            "n": 3400
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.3,
+            "p95": 0.5,
+            "max": 1.7,
+            "n": 3400
+          }
+        },
+        "robot-01/data-latest": {
+          "expect_hz": 50,
+          "fps": 50,
+          "edge_to_probe_ms": {
+            "p50": 0.8,
+            "p95": 1,
+            "max": 2,
+            "n": 850
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.4,
+            "p95": 0.5,
+            "max": 1,
+            "n": 850
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.4,
+            "p95": 0.5,
+            "max": 1.6,
+            "n": 850
+          }
+        },
+        "robot-01/data-stream": {
+          "expect_hz": 100,
+          "fps": 99.9,
+          "edge_to_probe_ms": {
+            "p50": 0.6,
+            "p95": 0.8,
+            "max": 2,
+            "n": 1700
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.3,
+            "p95": 0.4,
+            "max": 0.8,
+            "n": 1700
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.3,
+            "p95": 0.5,
+            "max": 1.7,
+            "n": 1700
+          }
+        }
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 17,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 17,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 17,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/data-datagram": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 3400,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 3400,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 3400,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/data-latest": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 850,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 850,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 850,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/data-stream": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 1700,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 1700,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0,
+            "n": 1700,
+            "p50": 0,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        }
+      },
+      "cpu_pct": {
+        "relay": 6.2,
+        "edge": 4.7
+      }
+    },
+    "join": {
+      "name": "join",
+      "what": "join to live video: 10 cold joins (edge idle, nobody subscribed), then 10 warm (another viewer already in)",
+      "secs": 3,
+      "live_threshold_ms": 100,
+      "join": {
+        "cold": {
+          "robot-01/front": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 140.2,
+              "p50": 95.8,
+              "p95": 548.3,
+              "max": 548.3
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 188.4,
+              "p50": 200.5,
+              "p95": 548.3,
+              "max": 548.3
+            },
+            "live_of": "10/10"
+          },
+          "robot-01/rear": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 193.4,
+              "p50": 211.4,
+              "p95": 564.6,
+              "max": 564.6
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 201,
+              "p50": 211.4,
+              "p95": 564.6,
+              "max": 564.6
+            },
+            "live_of": "10/10"
+          }
+        },
+        "warm": {
+          "robot-01/front": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 357.2,
+              "p50": 413.4,
+              "p95": 639.5,
+              "max": 639.5
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 386.5,
+              "p50": 413.4,
+              "p95": 639.5,
+              "max": 639.5
+            },
+            "live_of": "10/10"
+          },
+          "robot-01/rear": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 342.8,
+              "p50": 373.1,
+              "p95": 648.7,
+              "max": 648.7
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 402.5,
+              "p50": 424,
+              "p95": 648.7,
+              "max": 648.7
+            },
+            "live_of": "10/10"
+          }
+        }
+      },
+      "cpu_pct": {
+        "relay": 1.1,
+        "edge": 0.7
+      }
+    },
+    "join-starlink": {
+      "name": "join-starlink",
+      "what": "join through starlink",
+      "secs": 3,
+      "live_threshold_ms": 200,
+      "join": {
+        "cold": {
+          "robot-01/front": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 294.3,
+              "p50": 260.5,
+              "p95": 692.7,
+              "max": 692.7
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 295.1,
+              "p50": 260.5,
+              "p95": 692.7,
+              "max": 692.7
+            },
+            "live_of": "10/10"
+          },
+          "robot-01/rear": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 274.7,
+              "p50": 250.7,
+              "p95": 716.2,
+              "max": 716.2
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 303.8,
+              "p50": 273.7,
+              "p95": 716.2,
+              "max": 716.2
+            },
+            "live_of": "10/10"
+          }
+        },
+        "warm": {
+          "robot-01/front": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 433.5,
+              "p50": 461.7,
+              "p95": 677.3,
+              "max": 677.3
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 433.5,
+              "p50": 461.7,
+              "p95": 677.3,
+              "max": 677.3
+            },
+            "live_of": "10/10"
+          },
+          "robot-01/rear": {
+            "first_frame_ms": {
+              "n": 10,
+              "mean": 439.8,
+              "p50": 471.9,
+              "p95": 682.1,
+              "max": 682.1
+            },
+            "live_ms": {
+              "n": 10,
+              "mean": 439.8,
+              "p50": 471.9,
+              "p95": 682.1,
+              "max": 682.1
+            },
+            "live_of": "10/10"
+          }
+        }
+      },
+      "cpu_pct": {
+        "relay": 1.2,
+        "edge": 0.7
+      }
+    },
+    "app-direct": {
+      "name": "app-direct",
+      "what": "video-direct with tq-app (viewer) open: decode, decoded→painted, capture→render",
+      "secs": 30,
+      "tracks": {
+        "robot-01/front": {
+          "codec": "avc1.42001f",
+          "fps": 30,
+          "kbps": 587,
+          "capture_to_probe_ms": {
+            "p50": 13.5,
+            "p95": 17.9,
+            "max": 20.5,
+            "n": 930
+          },
+          "capture_to_pub_ms": {
+            "p50": 12.6,
+            "p95": 16.8,
+            "max": 19.6,
+            "n": 930
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.3,
+            "p95": 0.4,
+            "max": 0.9,
+            "n": 930
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.6,
+            "p95": 0.9,
+            "max": 1.9,
+            "n": 930
+          },
+          "over_50ms": 0,
+          "over_100ms": 0
+        },
+        "robot-01/rear": {
+          "codec": "hev1.1.6.L93.B0",
+          "fps": 30,
+          "kbps": 366,
+          "capture_to_probe_ms": {
+            "p50": 13.9,
+            "p95": 18.4,
+            "max": 22,
+            "n": 930
+          },
+          "capture_to_pub_ms": {
+            "p50": 13.1,
+            "p95": 17.5,
+            "max": 20.8,
+            "n": 930
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.3,
+            "p95": 0.4,
+            "max": 1.9,
+            "n": 930
+          },
+          "relay_to_probe_ms": {
+            "p50": 0.5,
+            "p95": 0.8,
+            "max": 1.2,
+            "n": 930
+          },
+          "over_50ms": 0,
+          "over_100ms": 0
+        }
+      },
+      "teleop": {
+        "ack_rtt_ms": {
+          "p50": 0.8,
+          "p95": 1.1,
+          "max": 1.7,
+          "n": 680
+        },
+        "heartbeat_rtt_ms": {
+          "p50": 0.8,
+          "p95": 1.1,
+          "max": 1.5,
+          "n": 340
+        },
+        "acks": {
+          "Ok": 680
+        },
+        "tripped_at_end": false
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.3,
+            "mean": 0.2,
+            "n": 31,
+            "p50": 0.2,
+            "p95": 0.3
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/front": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.3,
+            "mean": 0.2,
+            "n": 930,
+            "p50": 0.2,
+            "p95": 0.3
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/rear": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.3,
+            "mean": 0.2,
+            "n": 930,
+            "p50": 0.2,
+            "p95": 0.3
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 930,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        }
+      },
+      "quic": {
+        "congestion_events": 0,
+        "cwnd": 353149,
+        "lost_packets": 0,
+        "rtt_ms": 0.255287,
+        "sent_packets": 3429
+      },
+      "app": {
+        "robot-01/front": {
+          "decode": {
+            "avg_of_2s_avgs": 1.9,
+            "worst_2s_max": 2.4
+          },
+          "capture→decoded": {
+            "avg_of_2s_avgs": 15.5,
+            "worst_2s_max": 20.8
+          },
+          "decoded→painted": {
+            "avg_of_2s_avgs": 6.8,
+            "worst_2s_max": 18.3
+          },
+          "capture→render": {
+            "avg_of_2s_avgs": 22.2,
+            "worst_2s_max": 38.6
+          }
+        },
+        "robot-01/rear": {
+          "decode": {
+            "avg_of_2s_avgs": 1.9,
+            "worst_2s_max": 2.4
+          },
+          "capture→decoded": {
+            "avg_of_2s_avgs": 16.2,
+            "worst_2s_max": 21.3
+          },
+          "decoded→painted": {
+            "avg_of_2s_avgs": 5.9,
+            "worst_2s_max": 18.7
+          },
+          "capture→render": {
+            "avg_of_2s_avgs": 22.1,
+            "worst_2s_max": 39
+          }
+        }
+      },
+      "cpu_pct": {
+        "relay": 1.6,
+        "edge": 1
+      }
+    },
+    "app-prodlike": {
+      "name": "app-prodlike",
+      "what": "prodlike-direct with tq-app open",
+      "secs": 30,
+      "tracks": {
+        "robot-01/front": {
+          "codec": "hev1.1.6.L93.B0",
+          "fps": 10,
+          "kbps": 1718,
+          "capture_to_probe_ms": {
+            "p50": 26,
+            "p95": 30.2,
+            "max": 37.6,
+            "n": 310
+          },
+          "capture_to_pub_ms": {
+            "p50": 23.7,
+            "p95": 25.8,
+            "max": 26.5,
+            "n": 310
+          },
+          "pub_to_relay_ms": {
+            "p50": 0.5,
+            "p95": 1.7,
+            "max": 5.9,
+            "n": 310
+          },
+          "relay_to_probe_ms": {
+            "p50": 1.5,
+            "p95": 5.1,
+            "max": 7.4,
+            "n": 310
+          },
+          "over_50ms": 0,
+          "over_100ms": 0
+        }
+      },
+      "teleop": {
+        "ack_rtt_ms": {
+          "p50": 1,
+          "p95": 1.5,
+          "max": 9.1,
+          "n": 680
+        },
+        "heartbeat_rtt_ms": {
+          "p50": 1,
+          "p95": 1.5,
+          "max": 2.6,
+          "n": 340
+        },
+        "acks": {
+          "Ok": 680
+        },
+        "tripped_at_end": false
+      },
+      "clock_check": {
+        "robot-01/.status": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 31,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 31,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        },
+        "robot-01/front": {
+          "abs_error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 310,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "claimed_bound_ms": {
+            "max": 0.4,
+            "mean": 0.3,
+            "n": 310,
+            "p50": 0.3,
+            "p95": 0.4
+          },
+          "error_ms": {
+            "max": 0.1,
+            "mean": 0.1,
+            "n": 310,
+            "p50": 0.1,
+            "p95": 0.1
+          },
+          "within_bound": 1
+        }
+      },
+      "quic": {
+        "congestion_events": 0,
+        "cwnd": 347071,
+        "lost_packets": 0,
+        "rtt_ms": 0.30071,
+        "sent_packets": 4306
+      },
+      "app": {
+        "robot-01/front": {
+          "decode": {
+            "avg_of_2s_avgs": 2.7,
+            "worst_2s_max": 3.2
+          },
+          "capture→decoded": {
+            "avg_of_2s_avgs": 27.6,
+            "worst_2s_max": 35.8
+          },
+          "decoded→painted": {
+            "avg_of_2s_avgs": 11.6,
+            "worst_2s_max": 17.1
+          },
+          "capture→render": {
+            "avg_of_2s_avgs": 39.2,
+            "worst_2s_max": 45.1
+          }
+        }
+      },
+      "cpu_pct": {
+        "relay": 2.6,
+        "edge": 1.4
+      }
+    },
+    "fanout-10": {
+      "name": "fanout-10",
+      "what": "10 viewer probes on the video-direct stream at once",
+      "secs": 20,
+      "probes": 10,
+      "tracks": {
+        "robot-01/front": {
+          "fps_min": 30,
+          "capture_to_probe_p50_across_probes": {
+            "n": 10,
+            "mean": 16,
+            "p50": 16,
+            "p95": 16,
+            "max": 16
+          },
+          "capture_to_probe_p95_across_probes": {
+            "n": 10,
+            "mean": 18.8,
+            "p50": 18.7,
+            "p95": 19,
+            "max": 19
+          }
+        },
+        "robot-01/rear": {
+          "fps_min": 30,
+          "capture_to_probe_p50_across_probes": {
+            "n": 10,
+            "mean": 15.8,
+            "p50": 15.8,
+            "p95": 15.9,
+            "max": 15.9
+          },
+          "capture_to_probe_p95_across_probes": {
+            "n": 10,
+            "mean": 18.5,
+            "p50": 18.5,
+            "p95": 18.7,
+            "max": 18.7
+          }
+        }
+      },
+      "cpu_pct": {
+        "relay": 5.3,
+        "edge": 0.7
+      }
+    }
+  }
+}
