@@ -171,8 +171,10 @@ impl Layout {
             if w.kind.is_empty() {
                 errors.push(format!("widgets[{i}].type must not be empty"));
             }
-            let [x, _, cw, ch] = w.at;
-            if cw < 1 || ch < 1 || x + cw > g.cols {
+            // The web's bounds; they also keep the cell sums from overflowing.
+            let [x, y, cw, ch] = w.at;
+            if x >= g.cols || y > 10_000 || !(1..=g.cols).contains(&cw) || !(1..=1_000).contains(&ch) || x + cw > g.cols
+            {
                 errors.push(format!(
                     "widgets[{i}].at must be [col, row, width, height] inside {} columns",
                     g.cols
@@ -792,6 +794,15 @@ mod tests {
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(Layout::parse(&EXAMPLE.replace(r#""version": 1"#, r#""version": 2"#)).is_err());
         assert!(Layout::parse("[]").is_err());
+        // Cells that would overflow the sums.
+        for at in [
+            "[4294967295, 4, 3, 4]",
+            "[9, 4294967295, 3, 4]",
+            "[9, 4, 3, 4294967295]",
+        ] {
+            let bad = EXAMPLE.replace("[9, 4, 3, 4]", at);
+            assert_eq!(Layout::parse(&bad).unwrap_err().len(), 1, "{at}");
+        }
     }
 
     #[test]

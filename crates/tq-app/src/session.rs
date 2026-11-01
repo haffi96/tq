@@ -175,6 +175,10 @@ pub struct Shared {
     client: Client,
     /// Locks this app holds.
     holds: Mutex<HashMap<Path, Hold>>,
+    /// Bumped per lock by release and remote stop, so a claim still in
+    /// flight lets go when granted instead of holding on. Taken before
+    /// `holds` when both are needed.
+    hold_gen: Mutex<HashMap<Path, u64>>,
     /// What the widgets are bound to.
     wants: tokio::sync::watch::Sender<Vec<Subscription>>,
     rt: tokio::runtime::Handle,
@@ -304,6 +308,7 @@ impl Shared {
             return;
         };
         let previous = self.holds.lock().unwrap().remove(&lock);
+        let gen = *self.hold_gen.lock().unwrap().entry(lock.clone()).or_default();
         let shared = self.clone();
         self.rt.spawn(async move {
             if let Some(h) = previous.filter(|h| h.is_held()) {
@@ -311,8 +316,23 @@ impl Shared {
             }
             let line = match session.hold(lock.clone(), force, HEARTBEAT).await {
                 Ok(Ok(hold)) => {
-                    shared.holds.lock().unwrap().insert(lock.clone(), hold);
-                    format!("Claim granted: you hold {lock}")
+                    // Inserted under `hold_gen`, so a release or stop either
+                    // sees the hold or bumps the generation first.
+                    let stale = {
+                        let gens = shared.hold_gen.lock().unwrap();
+                        if gens.get(&lock).copied().unwrap_or(0) == gen {
+                            shared.holds.lock().unwrap().insert(lock.clone(), hold);
+                            None
+                        } else {
+                            Some(hold)
+                        }
+                    };
+                    if let Some(hold) = stale {
+                        let _ = hold.release().await;
+                        format!("Claim of {lock} let go: released or stopped while it was pending")
+                    } else {
+                        format!("Claim granted: you hold {lock}")
+                    }
                 }
                 Ok(Err(refused)) => format!("Claim of {lock} refused: {}", refused.reason),
                 Err(e) => format!("Claim of {lock} failed: {e:#}"),
@@ -326,7 +346,11 @@ impl Shared {
         let Some(session) = self.session() else {
             return;
         };
-        let hold = self.holds.lock().unwrap().remove(&lock);
+        let hold = {
+            let mut gens = self.hold_gen.lock().unwrap();
+            *gens.entry(lock.clone()).or_default() += 1;
+            self.holds.lock().unwrap().remove(&lock)
+        };
         let shared = self.clone();
         self.rt.spawn(async move {
             let r = match hold {
@@ -358,7 +382,11 @@ impl Shared {
         for channel in targets {
             self.rt.spawn(send_remote_stop(self.clone(), channel));
         }
-        let holds: Vec<Hold> = self.holds.lock().unwrap().drain().map(|(_, h)| h).collect();
+        let holds: Vec<Hold> = {
+            let mut gens = self.hold_gen.lock().unwrap();
+            gens.values_mut().for_each(|g| *g += 1);
+            self.holds.lock().unwrap().drain().map(|(_, h)| h).collect()
+        };
         for hold in holds {
             self.rt.spawn(async move {
                 let _ = hold.release().await;
@@ -400,6 +428,7 @@ pub fn start(rt: &tokio::runtime::Runtime, config: Config, events: UnboundedSend
         drive_targets: Mutex::default(),
         client: client.clone(),
         holds: Mutex::default(),
+        hold_gen: Mutex::default(),
         wants: tokio::sync::watch::Sender::new(Vec::new()),
         rt: rt.handle().clone(),
         events,

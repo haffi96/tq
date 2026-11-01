@@ -81,6 +81,8 @@ export class Board {
   layout: Layout;
   /** Whether the layout is the user's (stored) rather than the preset. */
   saved = false;
+  /** Whether the browser refused the last write of the user's layout. */
+  private storeFailed = false;
   editing = false;
   private widgets = new Map<string, Widget>();
   private routes = new Map<Path, Widget[]>();
@@ -354,7 +356,7 @@ export class Board {
     const videos = [...this.widgets.values()].filter((w) => w.def?.cost.decode && w.track);
     const decodes = new Set(videos.map((w) => w.track)).size;
     const n = [...warns.values()].reduce((a, l) => a + l.length, 0);
-    this.summary.textContent = `${this.widgets.size} widgets · ${decodes} video decode(s), ${videos.length} draw(s) per frame · ${n ? `${n} warning(s), see ⚠` : 'no warnings'} · ${this.saved ? 'saved in this browser' : 'preset (not saved)'}`;
+    this.summary.textContent = `${this.widgets.size} widgets · ${decodes} video decode(s), ${videos.length} draw(s) per frame · ${n ? `${n} warning(s), see ⚠` : 'no warnings'} · ${!this.saved ? 'preset (not saved)' : this.storeFailed ? 'NOT saved: the browser refused it, edits are lost on reload' : 'saved in this browser'}`;
   }
 
   // --- editing ---------------------------------------------------------------------------
@@ -371,7 +373,9 @@ export class Board {
     this.saved = true;
     try {
       localStorage.setItem(this.storageKey, JSON.stringify(this.layout));
+      this.storeFailed = false;
     } catch (e) {
+      this.storeFailed = true;
       console.warn('layout not saved (kept until the page reloads):', e);
     }
     this.render();
