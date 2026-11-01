@@ -50,6 +50,11 @@ struct Args {
     /// its ack: `--send rover/lights='{"on":true}'`. Repeatable.
     #[arg(long, value_name = "BROADCAST/CHANNEL=JSON")]
     send: Vec<String>,
+    /// Send each `--send` message again every this-many ms until one is
+    /// acked, as the consoles do with a remote stop (0: once). Its round
+    /// trip is then from the first send.
+    #[arg(long, default_value_t = 0)]
+    resend_ms: u64,
     /// Every clock is this machine's (owner, relay and probe on one
     /// host), so raw timestamp differences are exact: report how far the
     /// offset-corrected numbers are from them, against the error bound
@@ -191,7 +196,8 @@ async fn main() -> anyhow::Result<()> {
         let (channel, body) = s.split_once('=').context("--send BROADCAST/CHANNEL=JSON")?;
         let channel: Path = channel.parse().map_err(|e| anyhow::anyhow!("--send {channel}: {e}"))?;
         let body: serde_json::Value = serde_json::from_str(body).context("--send: the message is not JSON")?;
-        tokio::spawn(send_once(session.clone(), channel, body, shared.clone()));
+        let resend = (args.resend_ms > 0).then(|| Duration::from_millis(args.resend_ms));
+        tokio::spawn(send_once(session.clone(), channel, body, resend, shared.clone()));
     }
     if args.teleop_hz > 0.0 {
         tokio::spawn(teleop(session.clone(), args.broadcast.clone(), args.teleop_hz, shared.clone()));
@@ -396,32 +402,53 @@ async fn read_track(
 }
 
 /// Sends `body` on `channel` once the channel is in the room; logs the ack.
-async fn send_once(session: Session, channel: Path, body: serde_json::Value, shared: Arc<Mutex<Shared>>) {
+/// Sends `body` on `channel` once the channel is in the room, again every
+/// `resend` until one copy is acked; logs the ack.
+async fn send_once(
+    session: Session,
+    channel: Path,
+    body: serde_json::Value,
+    resend: Option<Duration>,
+    shared: Arc<Mutex<Shared>>,
+) {
     let mut room = session.room();
     let _ = room
         .wait_for(|r| r.broadcast(&channel.broadcast).is_some_and(|b| b.channel(&channel.name).is_some()))
         .await;
     let mut replies = session.replies();
-    let seq = match session.channel(channel.clone()).send_json(&body) {
-        Ok(seq) => seq,
-        Err(e) => return tracing::warn!(%channel, error = format!("{e:#}"), "send failed"),
-    };
+    let out = session.channel(channel.clone());
+    let first = Instant::now();
+    // Each copy's seq and when it went out, after the first.
+    let mut seqs: HashMap<u32, Duration> = HashMap::new();
     let ack = tokio::time::timeout(Duration::from_secs(3), async {
-        while let Some(r) = next(&mut replies).await {
-            if let Reply::Ack { channel: c, seq: s, status, detail, rtt_us, .. } = r {
-                if c == channel && s == seq {
-                    return Some((status, detail, rtt_us));
-                }
+        let mut retry = tokio::time::interval(resend.unwrap_or(Duration::from_secs(3600)));
+        loop {
+            tokio::select! {
+                _ = retry.tick(), if resend.is_some() || seqs.is_empty() => match out.send_json(&body) {
+                    Ok(seq) => {
+                        seqs.insert(seq, first.elapsed());
+                    }
+                    Err(e) => tracing::warn!(%channel, error = format!("{e:#}"), "send failed"),
+                },
+                r = next(&mut replies) => match r {
+                    Some(Reply::Ack { channel: c, seq: s, status, detail, rtt_us, .. }) if c == channel && seqs.contains_key(&s) => {
+                        // The acked copy's own round trip (the SDK's, from
+                        // its send), plus how long after the first it went.
+                        let rtt_ms = seqs[&s].as_secs_f64() * 1000.0 + rtt_us as f64 / 1000.0;
+                        return Some((status, detail, rtt_ms, seqs.len()));
+                    }
+                    Some(_) => {}
+                    None => return None,
+                },
             }
         }
-        None
     })
     .await;
     match ack {
-        Ok(Some((status, detail, rtt_us))) => {
-            tracing::info!(%channel, ?status, %detail, rtt_ms = rtt_us as f64 / 1000.0, "sent");
+        Ok(Some((status, detail, rtt_ms, sends))) => {
+            tracing::info!(%channel, ?status, %detail, rtt_ms, sends, "sent");
             shared.lock().unwrap().sends.push(serde_json::json!({
-                "channel": channel.to_string(), "status": format!("{status:?}"), "rtt_ms": rtt_us as f64 / 1000.0,
+                "channel": channel.to_string(), "status": format!("{status:?}"), "rtt_ms": rtt_ms, "sends": sends,
             }));
         }
         _ => {

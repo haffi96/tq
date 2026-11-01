@@ -46,7 +46,7 @@ timestamps and an IDR every second:
 | `video-direct` | pair, no impairment. An operator probe subscribes to everything and drives at 20 Hz. Per-hop video latency, teleop ack and heartbeat round trips. |
 | `video-starlink` | the same, with the robot's uplink through `tq-impair --profile starlink` |
 | `prodlike-direct`, `-starlink`, `-starlink-bad` | the prodlike camera, direct and through both Starlink profiles |
-| `stop`, `stop-starlink` | the remote stop: 10 fresh operator sessions each send one `stop` and time its ack |
+| `stop`, `stop-starlink` | the remote stop: 10 fresh operator sessions each send a `stop`, resent every 50 ms until acked as the consoles do (`tq-probe --resend-ms 50`). The round trip runs from the first send, so a lost copy shows as a longer stop. Any stop not acked `Ok` fails the scenario. Through Starlink the round trip is longer than 50 ms, so 2–3 copies per stop is normal. |
 | `data` | data tracks at once: `latest` 50 Hz, `stream` 100 Hz, `datagram` 200 Hz, about 200 B of JSON each. Rate delivered, edge→probe latency per hop. |
 | `join`, `join-starlink` | subscribe → first frame, and → first *live* frame (capture→probe ≤ 100 ms, 200 ms on Starlink). 10 **cold** joins (nobody subscribed, so tq-edge is not sending) and 10 **warm** ones (another viewer is already in). |
 | `fanout-10` | 10 viewer probes at once; each one's p50 and p95, the lowest fps |
@@ -242,7 +242,7 @@ New in 3.0, so there is no 2.0 number:
 
 | Scenario | Result |
 | --- | --- |
-| `stop` | remote stop ack: p50 0.8–0.9 ms, p95 1.4–4.1 ms, 10/10 `Ok` |
+| `stop` | remote stop ack, one send each (before resends): p50 0.8–0.9 ms, p95 1.4–4.1 ms, 10/10 `Ok` |
 | `stop-starlink` | p50 61–63 ms, p95 69–70 ms, 10/10 `Ok` |
 | `data` | all rates delivered (50 / 100 / 200 Hz); edge→probe p50 0.5–0.7 ms, p95 under 1 ms |
 | `fanout-10` | every probe 29.6+ fps; p50 15–16.5 ms, p95 18.5–19.5 ms, the same as one probe |
@@ -261,7 +261,7 @@ tq-app. Both runs are shown where they differ.
 | `video-direct` (2 × 720p30) | capture→probe p50 / p95 22.7–24.7 / 27–28 ms: capture→pub 13.5–15.4, pub→relay 3.8–4.2 / 5, relay→probe 4.8–6.1 / 7–8. At most 1 frame over 50 ms in a run. |
 | `prodlike-direct` (2 Mbps H.265, 10 fps) | 38.4 / 50–54 ms: capture→pub 23, pub→relay 5 / 7.4, relay→probe 10–11 / 21–22. 16–26 frames per run over 50 ms, none over 100. |
 | teleop | ack round trip 17 / 19–28 ms, 680/680 `Ok` |
-| `stop` | remote stop ack 18–19 / 20 ms, 10/10 `Ok` |
+| `stop` | remote stop ack, one send each: 18–19 / 20 ms, 10/10 `Ok` |
 | `data` | all rates delivered; edge→probe 7–10 / 10–12 ms |
 | `join` | cold p50 200–230 ms; warm p50 310–430 ms |
 | `fanout-10` | every probe at 30 fps; p50 26–27 ms, p95 26–28 ms across probes |

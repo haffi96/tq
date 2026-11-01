@@ -680,5 +680,5 @@
       }
     }
   },
-  "note": "GCP relay 0.4.0 (5c691cb); edge and probes from the bench working tree at 5ab0659 plus the bench changes in fcce8ee. Home network, about 8 ms round trip to London. video-direct and prodlike-direct ran with tq-app open, so they are stored as app-direct and app-prodlike; there is no app-free video baseline for this relay yet."
+  "note": "GCP relay 0.4.0 (5c691cb); edge and probes from the bench working tree at 5ab0659 plus the bench changes in fcce8ee. Home network, about 8 ms round trip to London. video-direct and prodlike-direct ran with tq-app open, so they are stored as app-direct and app-prodlike; there is no app-free video baseline for this relay yet. Its stop scenario sent each stop once (before --resend-ms)."
 }

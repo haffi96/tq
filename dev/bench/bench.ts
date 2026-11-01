@@ -67,8 +67,8 @@ const SCENARIOS: Scenario[] = [
   { name: 'prodlike-direct', what: 'one H.265 720p10 2 Mbps camera (snow), length-prefixed', sources: 'prodlike', secs: 30, quickSecs: 15, kind: 'video' },
   { name: 'prodlike-starlink', what: 'prodlike through starlink', sources: 'prodlike', impair: 'starlink', secs: 45, quickSecs: 20, kind: 'video', quick: true },
   { name: 'prodlike-starlink-bad', what: 'prodlike through starlink-bad', sources: 'prodlike', impair: 'starlink-bad', secs: 45, quickSecs: 20, kind: 'video' },
-  { name: 'stop', what: 'remote stop ack round trip: 10 fresh operator sessions, one stop each', sources: 'pair', secs: 10, quickSecs: 5, kind: 'stop', quick: true, v3Only: true },
-  { name: 'stop-starlink', what: 'remote stop through starlink', sources: 'pair', impair: 'starlink', secs: 10, quickSecs: 5, kind: 'stop', v3Only: true },
+  { name: 'stop', what: 'remote stop: 10 fresh operator sessions, each sends a stop (resent every 50 ms until acked) and times the ack', sources: 'pair', secs: 40, quickSecs: 40, kind: 'stop', quick: true, v3Only: true },
+  { name: 'stop-starlink', what: 'remote stop through starlink', sources: 'pair', impair: 'starlink', secs: 40, quickSecs: 40, kind: 'stop', v3Only: true },
   { name: 'data', what: 'data tracks: latest 50 Hz, stream 100 Hz, datagram 200 Hz, ~200 B JSON', sources: 'none', data: true, secs: 20, quickSecs: 10, kind: 'data', quick: true, v3Only: true },
   { name: 'join', what: 'join to live video: 10 cold joins (edge idle, nobody subscribed), then 10 warm (another viewer already in)', sources: 'pair', secs: 3, quickSecs: 3, kind: 'join', quick: true, v3Only: true },
   { name: 'join-starlink', what: 'join through starlink', sources: 'pair', impair: 'starlink', secs: 3, quickSecs: 3, kind: 'join', v3Only: true },
@@ -416,12 +416,16 @@ async function runScenario(s: Scenario, build: Build, secs: number, logDir: stri
   } else if (s.kind === 'stop') {
     const rtts: number[] = [];
     const statuses: Record<string, number> = {};
+    const sends: number[] = []; // copies sent per stop until one was acked
     const runs = 10;
     for (let i = 0; i < runs; i++) {
-      const r = await probe(build, ['--preset', 'operator', '--send', 'robot-01/stop={}'], Math.max(2, Math.round(secs / runs)), plog(i));
+      // Resent every 50 ms until acked, as the consoles do; 4 s outlasts
+      // the probe's 3 s wait, so a stop never acked shows as no_ack.
+      const r = await probe(build, ['--preset', 'operator', '--send', 'robot-01/stop={}', '--resend-ms', '50'], 4, plog(i));
       for (const x of r.sends ?? []) {
         statuses[x.status] = (statuses[x.status] ?? 0) + 1;
         if (typeof x.rtt_ms === 'number') rtts.push(x.rtt_ms);
+        sends.push(x.sends ?? 1);
       }
     }
     // The remote stop must always stop the robot: anything but an Ok ack
@@ -432,6 +436,7 @@ async function runScenario(s: Scenario, build: Build, secs: number, logDir: stri
     }
     result.stop_ack_rtt_ms = summarize(rtts);
     result.statuses = statuses;
+    result.sends_per_stop = summarize(sends);
   } else if (s.kind === 'fanout') {
     const n = s.probes ?? 10;
     const rs = await Promise.all(Array.from({ length: n }, (_, i) => probe(build, ['--preset', 'viewer'], secs, plog(i))));
@@ -632,7 +637,7 @@ function report(r: any): string {
         }
       }
     }
-    if (s.stop_ack_rtt_ms !== undefined) lines.push(`stop ack rtt ${fmt(s.stop_ack_rtt_ms)} · ${JSON.stringify(s.statuses)}`);
+    if (s.stop_ack_rtt_ms !== undefined) lines.push(`stop ack rtt ${fmt(s.stop_ack_rtt_ms)} · ${JSON.stringify(s.statuses)} · sends per stop ${fmt(s.sends_per_stop)}`);
     if (s.clock_check) {
       for (const [p, c] of Object.entries<any>(s.clock_check)) {
         lines.push(`clock ${p}: |error| ${fmt(c.abs_error_ms)} ms, claimed bound ${fmt(c.claimed_bound_ms)} ms, within bound ${(c.within_bound * 100).toFixed(1)}%`);
