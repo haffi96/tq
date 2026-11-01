@@ -6,7 +6,9 @@
 //   bun dev/bench/bench.ts run --ref c4a3782     # build a git ref in a worktree, bench it
 //   TQ_SHARED_SECRET=... bun dev/bench/bench.ts run --relay https://tq-relay-1.haffi.dev
 //                                                # against a deployed relay; see docs/perf.md
+//   bun dev/bench/bench.ts run --save-baseline   # full run, then keep it in dev/bench/baselines/
 //   bun dev/bench/bench.ts compare BASE.json NEW.json [--fail]
+//   bun dev/bench/bench.ts compare NEW.json      # against the committed baseline for its machine and relay
 //   bun dev/bench/bench.ts list
 //
 // Everything runs on one host, so every clock is the same clock: the bench
@@ -19,7 +21,6 @@
 // STREAMING_TOOLS=...) for gstreamer-source.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '../..');
@@ -544,14 +545,19 @@ async function run(args: Map<string, string | true>) {
   const outFile = (args.get('out') as string) ?? join(ROOT, 'target/bench', `${stamp}-${build.label}.json`);
   const logDir = join(dirname(outFile), `${stamp}-${build.label}-logs`);
   mkdirSync(logDir, { recursive: true });
-  const machine = (await sh(['uname', '-sm'])).trim() + ' ' + (await sh(['sh', '-c', 'sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 "model name" /proc/cpuinfo | cut -d: -f2'])).trim();
+  if (args.has('save-baseline') && (quick || only)) throw new Error('--save-baseline needs a full run (no --quick or --only)');
+  // The hardware model, not the host name: baselines are committed.
+  const machine = (
+    await sh(['sh', '-c', 'echo "$(uname -sm) $(sysctl -n hw.model 2>/dev/null) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 "model name" /proc/cpuinfo | cut -d: -f2)"'])
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
   const out: any = {
     bench: 1,
     label: build.label,
     commit: build.commit,
     protocol: build.legacy ? '2' : '3',
     relay: REMOTE ?? 'local',
-    host: hostname(),
     machine,
     started: new Date().toISOString(),
     quick,
@@ -570,6 +576,14 @@ async function run(args: Map<string, string | true>) {
     writeFileSync(outFile, JSON.stringify(out, null, 2));
   }
   console.error(`\nwrote ${outFile}\nlogs in ${logDir}`);
+  if (args.has('save-baseline')) {
+    const failed = Object.values<any>(out.scenarios).filter((x) => x.error);
+    if (failed.length) throw new Error(`not saving a baseline: ${failed.map((x) => x.name).join(', ')} failed`);
+    const file = baselinePath(out);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(out, null, 2) + '\n');
+    console.error(`baseline ${file}`);
+  }
   console.log(report(out));
 }
 
@@ -680,6 +694,15 @@ function compare(a: any, b: any): { text: string; regressions: number } {
   return { text: lines.join('\n'), regressions };
 }
 
+// ---------------------------------------------------------------- baselines
+
+/** dev/bench/baselines/<machine>/<local | relay host>.json: one per machine and relay, replaced on each release. */
+function baselinePath(r: any): string {
+  const slug = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const relay = r.relay && r.relay !== 'local' ? new URL(r.relay).hostname : 'local';
+  return join(ROOT, 'dev/bench/baselines', slug(r.machine), `${relay}.json`);
+}
+
 // ---------------------------------------------------------------- main
 
 function parseArgs(argv: string[]) {
@@ -688,7 +711,7 @@ function parseArgs(argv: string[]) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) pos.push(a);
-    else if (argv[i + 1] && !argv[i + 1].startsWith('--') && !['quick', 'app', 'no-build', 'fail'].includes(a.slice(2))) m.set(a.slice(2), argv[++i]);
+    else if (argv[i + 1] && !argv[i + 1].startsWith('--') && !['quick', 'app', 'no-build', 'fail', 'save-baseline'].includes(a.slice(2))) m.set(a.slice(2), argv[++i]);
     else m.set(a.slice(2), true);
   }
   return { m, pos };
@@ -698,8 +721,17 @@ const [cmd, ...rest] = process.argv.slice(2);
 const { m, pos } = parseArgs(rest);
 if (cmd === 'run') {
   await run(m);
-} else if (cmd === 'compare' && pos.length === 2) {
-  const [a, b] = pos.map((p) => JSON.parse(readFileSync(p, 'utf8')));
+} else if (cmd === 'compare' && (pos.length === 1 || pos.length === 2)) {
+  let files = pos;
+  if (pos.length === 1) {
+    const base = baselinePath(JSON.parse(readFileSync(pos[0], 'utf8')));
+    if (!existsSync(base)) {
+      console.error(`no baseline for this machine and relay: ${base}\n(run --save-baseline on a release to make one)`);
+      process.exit(2);
+    }
+    files = [base, pos[0]];
+  }
+  const [a, b] = files.map((p) => JSON.parse(readFileSync(p, 'utf8')));
   const { text, regressions } = compare(a, b);
   console.log(text);
   if (m.has('fail') && regressions) process.exit(1);
@@ -709,6 +741,6 @@ if (cmd === 'run') {
   for (const s of SCENARIOS) console.log(`${s.quick ? '*' : ' '} ${s.name.padEnd(22)} ${s.secs}s  ${s.what}`);
   console.log('\n* in --quick');
 } else {
-  console.error('usage: bun dev/bench/bench.ts run [--quick] [--only a,b] [--app] [--ref REF | --bin-dir DIR] [--label L] [--out F]\n       bun dev/bench/bench.ts compare BASE.json NEW.json [--fail]\n       bun dev/bench/bench.ts report RESULT.json\n       bun dev/bench/bench.ts list');
+  console.error('usage: bun dev/bench/bench.ts run [--quick] [--only a,b] [--app] [--ref REF | --bin-dir DIR] [--relay URL] [--save-baseline] [--label L] [--out F]\n       bun dev/bench/bench.ts compare [BASE.json] NEW.json [--fail]\n       bun dev/bench/bench.ts report RESULT.json\n       bun dev/bench/bench.ts list');
   process.exit(2);
 }
