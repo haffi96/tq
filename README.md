@@ -51,12 +51,13 @@ where this is going is in [docs/roadmap.md](docs/roadmap.md).
 | `web/` | Browser console in TypeScript, built with bun. `worker.ts` owns WebTransport, WebCodecs and OffscreenCanvas; `main.ts` is the UI. |
 | `config/` | tq-edge configs: `edge.example.json` (H.264 + H.265 test sources, teleop), `edge.full.example.json` (adds a data track and a channel), `edge.prodlike.json` (one H.265 camera, 10 fps, 2 Mbps, length-prefixed, like a typical robot camera). See [install.md](docs/install.md#the-config). |
 | `dev/run-local.sh` | Starts the whole stack on one machine. |
+| `dev/bench/` | The performance regression bench ([docs/perf.md](docs/perf.md)). |
 | `dev/release.sh` | Bumps a component's version; CI uses it to check tags and write release notes. |
 | `build/version.rs` | Build script shared by the binaries: stamps the git commit into `--version` and the handshake. |
 | `packaging/` | tq-edge tarball/`.deb`/`install.sh` and service files, the relay's Dockerfile, the app's `.dmg` bundler. |
 | `infra/gcp/` | Terraform for the relay on GCP (London VM, Let's Encrypt, Cloudflare DNS). The web app deploys to Cloudflare from `web/` with wrangler. |
 | `assets/brand/` | The logo (`source.svg`) and `make.py`, which draws the favicon, app icons, GitHub avatar and social preview from it. |
-| `docs/` | [protocol-3.md](docs/protocol-3.md), [roadmap.md](docs/roadmap.md), [install.md](docs/install.md). |
+| `docs/` | [protocol-3.md](docs/protocol-3.md), [roadmap.md](docs/roadmap.md), [install.md](docs/install.md), [perf.md](docs/perf.md). |
 
 ## Using the SDK
 
@@ -353,6 +354,10 @@ Real robots need one of those as well; the remote stop is the operator's
 fast, convenient way to halt a robot from the console.
 
 ## Measuring
+
+To check for regressions, run `bun dev/bench/bench.ts run --quick` and
+compare against a baseline. [docs/perf.md](docs/perf.md) describes the
+scenarios and has the latest results.
 
 Both the page overlay and `tq-probe` report latency per hop. Each line is
 `avg/max` over the last 0.5 s.
