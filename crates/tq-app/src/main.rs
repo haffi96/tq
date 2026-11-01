@@ -5,8 +5,13 @@
 //! drawn as images.
 //!
 //! ```text
-//! tq-app --role operator --room robot-01      # relay on http://127.0.0.1:8080
+//! tq-app --preset operator --room robot-01      # relay on http://127.0.0.1:8080
 //! ```
+//!
+//! It shows a layout of widgets (docs/layout-1.md): `--layout` (or the
+//! settings file's `layout`), else the one last edited in the app for the
+//! room and preset, else a preset made from the room. The editor (the
+//! title bar's pencil) saves to where the layout came from.
 //!
 //! Started without flags (from Finder, or a desktop launcher) it reads its
 //! settings file ([`config`]); flags override the file.
@@ -17,6 +22,7 @@ compile_error!("tq-app decodes with VideoToolbox (macOS) or NVDEC (Linux) and on
 mod config;
 mod decode;
 mod feed;
+mod layout;
 #[cfg(target_os = "linux")]
 mod nvdec;
 mod session;
@@ -34,7 +40,6 @@ use gpui_kit::{
     component::{Theme, TitleBar},
     px, size, App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions,
 };
-use tq_proto::Role;
 
 actions!(tq_app, [Quit]);
 
@@ -56,16 +61,20 @@ struct Args {
     /// The room (robot) to join. Default robot-01.
     #[arg(long)]
     room: Option<String>,
-    /// operator or viewer (default).
-    #[arg(long)]
-    role: Option<Role>,
+    /// Token preset: operator or viewer (default).
+    #[arg(long, alias = "role")]
+    preset: Option<String>,
     /// Session token. Without one the app signs its own with --secret, or
     /// asks a --dev relay for one.
     #[arg(long)]
     token: Option<String>,
     #[arg(long, env = "TQ_SHARED_SECRET", hide_env_values = true)]
     secret: Option<String>,
-    /// Also log each camera's numbers every 2 s (headless checks).
+    /// A layout (docs/layout-1.md) to show instead of the preset made from
+    /// the room. Edits made in the app are saved back to it.
+    #[arg(long)]
+    layout: Option<PathBuf>,
+    /// Also log each video track's numbers every 2 s (headless checks).
     #[arg(long)]
     log_stats: bool,
     /// Print whether a newer release exists, then exit.
@@ -82,7 +91,7 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,quinn=warn".into()),
         )
         .init();
-    let build = tq_proto::build_info!("tq-app");
+    let build = tq_wire::build_info!("tq-app");
     let version: &'static str = Box::leak(build.long().into_boxed_str());
     let args = Args::from_arg_matches(&Args::command().version(version).get_matches()).unwrap_or_else(|e| e.exit());
     let file = config::File::load(args.config.as_deref())?;
@@ -93,9 +102,9 @@ fn main() -> anyhow::Result<()> {
     }
     update::clean_stale_staging();
 
-    let role = args.role.or(file.role).unwrap_or(Role::Viewer);
-    if role == Role::Publisher {
-        anyhow::bail!("--role must be operator or viewer");
+    let preset = args.preset.or(file.preset).unwrap_or_else(|| "viewer".into());
+    if !matches!(preset.as_str(), "operator" | "viewer") {
+        anyhow::bail!("--preset must be operator or viewer, not '{preset}'");
     }
     tracing::info!(%build, "starting");
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -113,44 +122,62 @@ fn main() -> anyhow::Result<()> {
         http,
         relay: args.relay.or(file.relay),
         room: args.room.or(file.room).unwrap_or_else(|| "robot-01".into()),
-        role,
+        preset,
         token: args.token.or(file.token),
         secret: args.secret.or(file.secret),
         log_stats: args.log_stats,
         build,
     };
-    let title = format!("tq · {} · {}", config.room, config.role);
+    // The layout: the given file, else the one saved for this room and
+    // preset, else (`None`) the preset made from the room. Edits are saved
+    // to where it came from.
+    let store = match args.layout.or(file.layout) {
+        Some(path) => Some(layout::Store { path, given: true }),
+        None => config::layouts_dir().map(|dir| layout::Store::for_room(dir, &config.room, &config.preset)),
+    };
+    let layout = match store.as_ref().map(|s| (s, s.load())) {
+        Some((s, Err(e))) if s.given => anyhow::bail!("{}: {e}", s.path.display()),
+        Some((s, Err(e))) => {
+            tracing::warn!("saved layout {} ignored: {e}", s.path.display());
+            None
+        }
+        Some((_, Ok(l))) => l,
+        None => None,
+    };
+    let title = format!("tq · {} · {}", config.room, config.preset);
     let shared = session::start(&rt, config, events_tx);
 
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx: &mut App| {
-        gpui_kit::init(cx);
-        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // Matches tq-app.desktop, so the launcher's icon is the window's.
-                app_id: Some("tq-app".into()),
-                #[cfg(target_os = "linux")]
-                icon: window_icon(),
-                ..TitleBar::window_options()
-            },
-            cx,
-            |window, cx| {
-                window.set_window_title(&title);
-                // Follow the system appearance; the title bar toggles it.
-                Theme::sync_system_appearance(Some(window), cx);
-                window
-                    .observe_window_appearance(|window, cx| Theme::sync_system_appearance(Some(window), cx))
-                    .detach();
-                cx.new(|cx| ui::AppView::new(shared, events_rx, updates, window, cx))
-            },
-        )
-        .expect("open window");
-        cx.activate(true);
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::AllAssets)
+        .run(move |cx: &mut App| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+            let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Matches tq-app.desktop, so the launcher's icon is the window's.
+                    app_id: Some("tq-app".into()),
+                    #[cfg(target_os = "linux")]
+                    icon: window_icon(),
+                    ..TitleBar::window_options()
+                },
+                cx,
+                |window, cx| {
+                    window.set_window_title(&title);
+                    // Follow the system appearance; the title bar toggles it.
+                    Theme::sync_system_appearance(Some(window), cx);
+                    window
+                        .observe_window_appearance(|window, cx| Theme::sync_system_appearance(Some(window), cx))
+                        .detach();
+                    cx.new(|cx| ui::AppView::new(shared, events_rx, updates, layout, store, window, cx))
+                },
+            )
+            .expect("open window");
+            cx.activate(true);
+        });
     drop(rt);
     Ok(())
 }

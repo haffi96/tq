@@ -71,6 +71,15 @@ impl AuAssembler {
         }
     }
 
+    /// Ends the access unit in progress, if it has a picture: for a
+    /// caller that knows where access units end (an encoder handing over
+    /// one per call).
+    pub fn flush(&mut self, out: &mut Vec<AccessUnit>) {
+        if self.has_vcl {
+            self.emit(out);
+        }
+    }
+
     fn emit(&mut self, out: &mut Vec<AccessUnit>) {
         let nals = std::mem::take(&mut self.nals);
         self.has_vcl = false;
@@ -146,6 +155,20 @@ mod tests {
         let out = feed(&mut a, &[AUD]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].nals, vec![b(P)]);
+    }
+
+    #[test]
+    fn flush_ends_the_picture_in_progress() {
+        let mut a = AuAssembler::new(Codec::H264, false);
+        assert!(feed(&mut a, &[SPS, PPS, IDR]).is_empty());
+        let mut out = Vec::new();
+        a.flush(&mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].nals.len(), 3);
+        // Nothing with no picture yet.
+        feed(&mut a, &[SPS]);
+        a.flush(&mut out);
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

@@ -72,7 +72,7 @@ resource "google_compute_firewall" "iap_ssh" {
 
 # --- secrets ----------------------------------------------------------------
 
-# The token secret shared by the relay, publishers and token minting.
+# The token secret shared by the relay, devices (tq-edge) and token minting.
 resource "random_password" "shared_secret" {
   length  = 48
   special = false

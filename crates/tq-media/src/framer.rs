@@ -116,6 +116,34 @@ impl NalFramer {
         result
     }
 
+    /// Ends the NAL unit in progress: for a caller whose chunks end on
+    /// NAL boundaries (one access unit per call, say), so an Annex B NAL
+    /// goes out without waiting for the next start code. Length-prefixed
+    /// NALs are complete already; a partial one stays buffered.
+    pub fn flush(&mut self, out: &mut Vec<Bytes>) -> Result<(), FramerError> {
+        if self.framing != Some(Framing::AnnexB) {
+            return Ok(());
+        }
+        let Some(start) = self.nal_start.take() else {
+            return Ok(());
+        };
+        let mut end = self.buf.len();
+        while end > start && self.buf[end - 1] == 0 {
+            end -= 1;
+        }
+        if end > start {
+            let nal = &self.buf[start..end];
+            if let Err(e) = Self::detect_codec(&mut self.codec, nal) {
+                self.reset();
+                return Err(e);
+            }
+            out.push(Bytes::copy_from_slice(nal));
+        }
+        self.buf.clear();
+        self.scan = 0;
+        Ok(())
+    }
+
     fn detect_codec(codec: &mut Option<Codec>, nal: &[u8]) -> Result<(), FramerError> {
         if codec.is_none() {
             *codec = Some(Codec::detect(nal).ok_or(FramerError::UnknownCodec(nal[0]))?);
@@ -321,6 +349,22 @@ mod tests {
         let mut f = NalFramer::new(FramingMode::Fixed(Framing::AnnexB), Some(Codec::H264));
         let nals = run(&mut f, &stream, 4);
         assert_eq!(nals, vec![SPS.to_vec(), PPS.to_vec(), AUD.to_vec()]);
+    }
+
+    #[test]
+    fn annexb_flush_ends_the_last_nal() {
+        let mut f = NalFramer::new(FramingMode::Auto, None);
+        let mut out = Vec::new();
+        f.push(&annexb(&[&[0x67, 0x42], &[0x68, 0xce], &[0x65, 0x88, 0, 0]]), &mut out)
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        f.flush(&mut out).unwrap();
+        assert_eq!(&out[2][..], &[0x65, 0x88]);
+        // The next chunk starts clean.
+        f.push(&annexb(&[&[0x41, 0x9a]]), &mut out).unwrap();
+        f.flush(&mut out).unwrap();
+        assert_eq!(&out[3][..], &[0x41, 0x9a]);
+        assert_eq!(out.len(), 4);
     }
 
     #[test]

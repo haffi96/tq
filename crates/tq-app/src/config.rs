@@ -8,7 +8,7 @@
 //! {
 //!   "relay_http": "https://tq-relay-1.haffi.dev",
 //!   "room": "robot-01",
-//!   "role": "operator",
+//!   "preset": "operator",
 //!   "secret": "…"
 //! }
 //! ```
@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
-use tq_proto::Role;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,9 +24,13 @@ pub struct File {
     pub relay_http: Option<String>,
     pub relay: Option<String>,
     pub room: Option<String>,
-    pub role: Option<Role>,
+    /// Token preset, `operator` or `viewer`; `role` before protocol 3.0.
+    #[serde(alias = "role")]
+    pub preset: Option<String>,
     pub token: Option<String>,
     pub secret: Option<String>,
+    /// A layout file (docs/layout-1.md).
+    pub layout: Option<PathBuf>,
     #[serde(default)]
     pub update: Update,
 }
@@ -59,6 +62,12 @@ pub fn default_path() -> Option<PathBuf> {
         None => Path::new(&std::env::var_os("HOME")?).join(".config"),
     };
     Some(base.join("tq-app/config.json"))
+}
+
+/// Where layouts edited in the app are kept: `layouts/` next to the
+/// settings file.
+pub fn layouts_dir() -> Option<PathBuf> {
+    Some(default_path()?.parent()?.join("layouts"))
 }
 
 impl File {

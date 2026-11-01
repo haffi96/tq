@@ -1,0 +1,102 @@
+# tq-edge release, from a tag edge-vX.Y.Z (dev/release.sh bump
+# edge X.Y.Z). One compile per platform, two distributions: tarballs for
+# install.sh (Linux x86_64/aarch64, macOS arm64) and .debs (Linux).
+name: release edge
+
+on:
+  push:
+    tags: ['edge-v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release binaries without DWARF (a third of the size); symbols stay.
+  CARGO_PROFILE_RELEASE_STRIP: debuginfo
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: dev/release.sh check edge "${GITHUB_REF_NAME#edge-v}"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      # zig cross-compiles the C in aws-lc-sys and links against an old glibc.
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build for glibc 2.31 and later (Ubuntu 20.04 and JetPack 5 up)
+        run: |
+          for arch in x86_64 aarch64; do
+            cargo zigbuild --release --locked -p tq-edge --target "$arch-unknown-linux-gnu.2.31"
+          done
+      - uses: docker/setup-qemu-action@v4
+      - name: Smoke test on Ubuntu 20.04
+        run: |
+          for p in amd64:x86_64 arm64:aarch64; do
+            docker run --rm --platform "linux/${p%%:*}" -v "$PWD/target/${p##*:}-unknown-linux-gnu/release:/b:ro" \
+              ubuntu:20.04 /b/tq-edge --version
+          done
+      - name: Package
+        run: |
+          v=${GITHUB_REF_NAME#edge-v}
+          packaging/edge/package.sh "$v" linux-x86_64 target/x86_64-unknown-linux-gnu/release/tq-edge dist
+          packaging/edge/package.sh "$v" linux-aarch64 target/aarch64-unknown-linux-gnu/release/tq-edge dist
+      - name: Install the .deb on Ubuntu 20.04
+        run: |
+          docker run --rm --platform linux/amd64 -v "$PWD/dist:/d:ro" ubuntu:20.04 sh -c \
+            'dpkg -i /d/tq-edge_*_amd64.deb && tq-edge --version && id tq && ls -l /etc/tq'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: edge-linux
+          path: dist/*
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - run: dev/release.sh check edge "${GITHUB_REF_NAME#edge-v}"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p tq-edge
+      - run: packaging/edge/package.sh "${GITHUB_REF_NAME#edge-v}" macos-aarch64 target/release/tq-edge dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: edge-macos
+          path: dist/*
+
+  release:
+    needs: [linux, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cp packaging/edge/install.sh dist/
+          (cd dist && sha256sum -- * > SHA256SUMS)
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${GITHUB_REF_NAME#edge-v}
+          {
+            echo "Install or upgrade (see docs/install.md):"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/packaging/edge/install.sh | bash -s -- --version $v"
+            echo "sudo apt install ./tq-edge_${v}_arm64.deb   # or _amd64"
+            echo '```'
+            echo
+            dev/release.sh notes edge "$GITHUB_REF_NAME"
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "tq-edge $v" --notes-file notes.md --latest=false dist/*

@@ -363,8 +363,17 @@ impl Decoder {
         };
         let size = data.len();
         let mut sample: CMSampleBufferRef = ptr::null();
-        let status =
-            CMSampleBufferCreateReady(kCFAllocatorDefault, block, self.format, 1, 1, &timing, 1, &size, &mut sample);
+        let status = CMSampleBufferCreateReady(
+            kCFAllocatorDefault,
+            block,
+            self.format,
+            1,
+            1,
+            &timing,
+            1,
+            &size,
+            &mut sample,
+        );
         CFRelease(block);
         if status != 0 {
             bail!("CMSampleBufferCreateReady: {status}");

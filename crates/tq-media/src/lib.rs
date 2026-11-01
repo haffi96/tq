@@ -1,4 +1,4 @@
-//! H.264 / H.265 elementary stream handling for the publisher.
+//! H.264 / H.265 elementary stream handling for tq-edge.
 //!
 //! The camera encoder serves a pre-encoded stream over TCP, either Annex B
 //! (start codes) or 4-byte length-prefixed. This crate turns those bytes into

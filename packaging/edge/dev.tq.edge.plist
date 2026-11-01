@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- launchd daemon for tq-edge on macOS, installed by install.sh into
+     /Library/LaunchDaemons. launchd has no environment file, so a shell
+     reads /etc/tq/edge.env first. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.tq.edge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; [ -f /etc/tq/edge.env ] &amp;&amp; . /etc/tq/edge.env; exec /usr/local/bin/tq-edge --config /etc/tq/edge.json</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>2</integer>
+  <key>StandardOutPath</key>
+  <string>/var/log/tq-edge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/tq-edge.log</string>
+</dict>
+</plist>

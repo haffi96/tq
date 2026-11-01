@@ -1,10 +1,12 @@
-//! One camera's frames on a node (publisher or relay): the current GOP for
-//! late joiners plus a broadcast to every live subscriber.
+//! One track's frames on a node (owner or relay): the current group for
+//! late joiners plus a broadcast to every live subscriber. Video groups are
+//! GOPs; a `latest` data track has one message per group, so the cache is
+//! its newest value; a `stream` data track caches the current window.
 
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
-use tq_proto::MediaFrame;
+use tq_wire::MediaFrame;
 
 /// Frames kept for late joiners. A GOP longer than this is not cached and a
 /// new subscriber waits for the next keyframe.
@@ -52,9 +54,10 @@ impl Track {
 
     /// Adds a frame from the source. A keyframe at index 0 starts a new
     /// group; anything else must be the next frame of the current group.
-    /// The frame is re-stamped with this track's group number and camera
-    /// index before it is cached and broadcast.
-    pub fn push(&self, mut frame: MediaFrame, camera: u16) -> Push {
+    /// The frame is re-stamped with this track's group number before it is
+    /// cached and broadcast. Senders write their own broadcast and track
+    /// indices, which can change while a frame waits.
+    pub fn push(&self, mut frame: MediaFrame) -> Push {
         let mut inner = self.inner.lock().unwrap();
         if frame.is_key() && frame.header.index == 0 {
             inner.in_group = Some(frame.group);
@@ -73,7 +76,6 @@ impl Track {
         }
         inner.next_index = frame.header.index + 1;
         frame.group = inner.out_group;
-        frame.camera = camera;
         let frame = Arc::new(frame);
         if inner.cache_valid {
             if inner.cache.len() < MAX_CACHED_FRAMES {
@@ -118,11 +120,12 @@ impl Track {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use tq_proto::{FrameHeader, FLAG_KEY};
+    use tq_wire::{FrameHeader, FLAG_KEY};
 
     fn frame(group: u64, index: u32) -> MediaFrame {
         MediaFrame {
-            camera: 9,
+            broadcast: 1,
+            track: 9,
             group,
             codec: "avc1.42c01f".into(),
             header: FrameHeader {
@@ -137,24 +140,23 @@ mod tests {
     #[test]
     fn caches_current_group_and_renumbers() {
         let t = Track::new();
-        assert_eq!(t.push(frame(7, 1), 0), Push::Dropped);
-        assert_eq!(t.push(frame(7, 0), 0), Push::Accepted);
-        assert_eq!(t.push(frame(7, 1), 0), Push::Accepted);
+        assert_eq!(t.push(frame(7, 1)), Push::Dropped);
+        assert_eq!(t.push(frame(7, 0)), Push::Accepted);
+        assert_eq!(t.push(frame(7, 1)), Push::Accepted);
         let (cache, mut rx) = t.subscribe();
         assert_eq!(cache.len(), 2);
         assert_eq!(cache[0].group, 1);
-        assert_eq!(cache[0].camera, 0);
         // Source restarts with a lower group number: still a new group.
-        assert_eq!(t.push(frame(0, 0), 0), Push::Accepted);
+        assert_eq!(t.push(frame(0, 0)), Push::Accepted);
         let f = rx.try_recv().unwrap();
         assert_eq!((f.group, f.header.index), (2, 0));
         // A frame of the superseded group is dropped without harming the
         // current one.
-        assert_eq!(t.push(frame(7, 2), 0), Push::Dropped);
+        assert_eq!(t.push(frame(7, 2)), Push::Dropped);
         assert_eq!(t.subscribe().0.len(), 1);
         // A gap drops the rest of the group.
-        assert_eq!(t.push(frame(0, 2), 0), Push::Dropped);
-        assert_eq!(t.push(frame(0, 1), 0), Push::Dropped);
+        assert_eq!(t.push(frame(0, 2)), Push::Dropped);
+        assert_eq!(t.push(frame(0, 1)), Push::Dropped);
         assert!(t.subscribe().0.is_empty());
     }
 }

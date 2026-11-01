@@ -7,7 +7,7 @@ browser ── https://tq.haffi.dev ──────────────�
    │
    ├── https://tq-relay-1.haffi.dev/api/*  (TCP 443)  ┐
    └── WebTransport tq-relay-1.haffi.dev   (UDP 443)  ├► GCE VM: COS + docker, relay image
-robot ──── tq-publisher ── QUIC            (UDP 443)  ┘   Let's Encrypt cert (DNS-01, Cloudflare)
+robot ──── tq-edge ── QUIC            (UDP 443)  ┘   Let's Encrypt cert (DNS-01, Cloudflare)
 ```
 
 What Terraform creates:
@@ -31,8 +31,8 @@ works as well as `https://tq.haffi.dev/?room=…`.
 - A Cloudflare API token on `haffi.dev` with **Zone → Zone → Read** and
   **Zone → DNS → Edit**. Terraform needs Read to look the zone up by name, and
   Edit to create the A record. certbot on the VM uses it for DNS-01.
-- The relay image: `ghcr.io/haffi96/tq-relay:0.2.0` (or newer). It needs
-  `--http-tls` and `--cors-origins`.
+- The relay image: `ghcr.io/haffi96/tq-relay:0.4.0` (or newer), protocol
+  3.0, which tq-edge 0.1.0, tq-app 0.5.0 and the web app 0.3.0 speak.
 
 ## State
 
@@ -86,30 +86,32 @@ same secret:
 
 ```sh
 export TQ_SHARED_SECRET=$(terraform output -raw shared_secret)
-cargo run -p tq-relay -- token --role operator --room robot-01 --ttl-hours 12
+cargo run -p tq-relay -- token --preset operator --room robot-01 --ttl-hours 12
 ```
 
-Then open `https://tq.haffi.dev/?room=robot-01&role=operator&token=…`.
+Then open `https://tq.haffi.dev/?room=robot-01&preset=operator&token=…`.
 
-Publisher config:
+tq-edge config (`relay` section):
 
 ```json
-"relay_url": "https://tq-relay-1.haffi.dev:443",
-"relay_trust": { "mode": "system_roots" },
-"shared_secret": "<terraform output -raw shared_secret>"
+"relay": {
+  "url": "https://tq-relay-1.haffi.dev:443",
+  "trust": { "mode": "system_roots" },
+  "shared_secret": "<terraform output -raw shared_secret>"
+}
 ```
 
 For a test feed from this machine, `dev/publish-gcp.sh` runs the two test
-sources (H.264 and H.265) and a publisher using `config/publisher.gcp.json`.
+sources (H.264 and H.265) and tq-edge using `config/edge.gcp.json`.
 It reads the secret from the Terraform state.
 
-tq-app (0.3.0 or newer) settings file:
+tq-app (0.5.0 or newer) settings file:
 
 ```json
 {
   "relay_http": "https://tq-relay-1.haffi.dev",
   "room": "robot-01",
-  "role": "operator",
+  "preset": "operator",
   "secret": "<terraform output -raw shared_secret>"
 }
 ```

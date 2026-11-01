@@ -8,7 +8,7 @@ output "relay_url" {
 }
 
 output "shared_secret" {
-  description = "Token secret: publisher config, `tq-relay token`. `terraform output -raw shared_secret`."
+  description = "Token secret: tq-edge config, `tq-relay token`. `terraform output -raw shared_secret`."
   value       = random_password.shared_secret.result
   sensitive   = true
 }

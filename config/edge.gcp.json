@@ -1,0 +1,52 @@
+{
+  "room": "robot-01",
+  "relay": {
+    "url": "https://tq-relay-1.haffi.dev:443",
+    "trust": {
+      "mode": "system_roots"
+    },
+    "shared_secret": "",
+    "max_lag_ms": 400,
+    "quic": {
+      "congestion": "bbr",
+      "send_window": 1048576
+    }
+  },
+  "tracks": [
+    {
+      "id": "front",
+      "label": "Front (H.264)",
+      "kind": "video",
+      "video": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30
+      },
+      "source": {
+        "type": "tcp",
+        "addr": "127.0.0.1:5010"
+      }
+    },
+    {
+      "id": "rear",
+      "label": "Rear (H.265)",
+      "kind": "video",
+      "video": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30
+      },
+      "source": {
+        "type": "tcp",
+        "addr": "127.0.0.1:5011"
+      }
+    }
+  ],
+  "teleop": {
+    "heartbeat_loss_ms": 500,
+    "command_stale_ms": 500,
+    "sink": {
+      "type": "log"
+    }
+  }
+}

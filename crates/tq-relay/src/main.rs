@@ -1,18 +1,17 @@
-//! tq-relay: the meeting point between the robot and browsers.
+//! tq-relay: where sessions meet.
 //!
-//! One WebTransport endpoint serves both sides:
-//! - `/v1/publish/{room}`: the robot publisher (publisher token);
-//! - `/v1/session/{room}`: operators and viewers (role in the token).
+//! One WebTransport endpoint, `/v1/room/{room}`, serves every session.
+//! What a session may do (publish broadcasts, subscribe to tracks, write
+//! to channels, claim locks) comes from its token's permissions. Each room
+//! ([`room`]) tells its sessions about every change as sequenced events.
 //!
-//! Each robot has a room ([`room`]); its participants hear about every
-//! change in it as sequenced events.
-//!
-//! Video is fanned out per camera from a GOP cache with a per-role drop
-//! policy; teleop datagrams pass between the claim holder and the robot.
+//! Tracks are fanned out from a cache (the current group, or the newest
+//! datagram) with a drop policy each subscriber chooses; channel datagrams
+//! go from senders to the broadcast's owner, checked against permissions
+//! and locks, and acks come back to the sender alone.
 
-mod client;
-mod publisher;
 mod room;
+mod session;
 #[cfg(test)]
 mod tests;
 mod web;
@@ -21,12 +20,12 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-use tq_proto::{now_us, sign_token, verify_token, BuildInfo, Claims, Role};
+use tq_wire::{now_us, sign_token, verify_token, BuildInfo, Claims, Perms};
 use tq_transport::{
     group::SendPolicy,
     quic::{Congestion, QuicOptions},
@@ -77,18 +76,19 @@ struct Args {
     /// Connection send window (bytes queued + in flight) per session.
     #[arg(long, default_value_t = 1 << 20)]
     send_window: u64,
-    /// Operator drop policy: frames older than this are dropped with the
-    /// rest of their GOP.
-    #[arg(long, default_value_t = 250)]
-    operator_max_lag_ms: u64,
-    /// Viewer drop policy.
-    #[arg(long, default_value_t = 1500)]
-    viewer_max_lag_ms: u64,
-    /// Older GOPs a viewer may keep receiving after a new one starts.
-    #[arg(long, default_value_t = 1)]
-    viewer_keep_groups: usize,
-    /// Seconds a room keeps its tracks (offline) after the publisher drops,
-    /// before unpublishing them.
+    /// `realtime` subscriptions: frames older than this are dropped with
+    /// the rest of their group.
+    #[arg(long, alias = "operator-max-lag-ms", default_value_t = 250)]
+    realtime_max_lag_ms: u64,
+    /// `smooth` subscriptions.
+    #[arg(long, alias = "viewer-max-lag-ms", default_value_t = 1500)]
+    smooth_max_lag_ms: u64,
+    /// Older groups a `smooth` subscription may keep receiving after a new
+    /// one starts.
+    #[arg(long, alias = "viewer-keep-groups", default_value_t = 1)]
+    smooth_keep_groups: usize,
+    /// Seconds a broadcast stays (offline) after its owner drops, before it
+    /// is removed.
     #[arg(long, default_value_t = 30)]
     track_grace_secs: u64,
 }
@@ -97,8 +97,12 @@ struct Args {
 enum Command {
     /// Print a token signed with --secret.
     Token {
+        /// A preset: `operator`, `viewer`, `robot` or `robot:<broadcast>`.
         #[arg(long)]
-        role: Role,
+        preset: Option<String>,
+        /// A permission (`verb:pattern`), repeatable; added to the preset.
+        #[arg(long = "perm")]
+        perms: Vec<String>,
         #[arg(long)]
         room: String,
         #[arg(long, default_value = "cli")]
@@ -117,9 +121,8 @@ pub struct Relay {
     pub self_signed: bool,
     pub quic_port: u16,
     pub dev: bool,
-    pub operator_policy: SendPolicy,
-    pub viewer_policy: SendPolicy,
-    pub next_conn: AtomicU64,
+    pub realtime_policy: SendPolicy,
+    pub smooth_policy: SendPolicy,
 }
 
 impl Relay {
@@ -140,22 +143,29 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,quinn=warn".into()),
         )
         .init();
-    let build = tq_proto::build_info!("tq-relay");
+    let build = tq_wire::build_info!("tq-relay");
     let args = parse_args(&build);
     anyhow::ensure!(!args.secret.is_empty(), "--secret / TQ_SHARED_SECRET must not be empty");
 
     if let Some(Command::Token {
-        role,
+        preset,
+        perms,
         room,
         sub,
         ttl_hours,
     }) = args.command
     {
+        let mut all = match preset.as_deref() {
+            Some(p) => Perms::preset(p).ok_or_else(|| anyhow::anyhow!("unknown preset '{p}'"))?,
+            None => Perms::default(),
+        };
+        all.0.extend(perms);
+        anyhow::ensure!(!all.0.is_empty(), "give --preset and/or --perm");
         let claims = Claims {
             sub,
-            role,
             room,
             exp: now_us() / 1_000_000 + ttl_hours * 3600,
+            perms: all,
         };
         println!("{}", sign_token(args.secret.as_bytes(), &claims));
         return Ok(());
@@ -183,15 +193,14 @@ async fn main() -> anyhow::Result<()> {
         self_signed: cert.self_signed,
         quic_port: args.quic.port(),
         dev: args.dev,
-        operator_policy: SendPolicy {
+        realtime_policy: SendPolicy {
             keep_groups: 0,
-            max_lag: Duration::from_millis(args.operator_max_lag_ms),
+            max_lag: Duration::from_millis(args.realtime_max_lag_ms),
         },
-        viewer_policy: SendPolicy {
-            keep_groups: args.viewer_keep_groups,
-            max_lag: Duration::from_millis(args.viewer_max_lag_ms),
+        smooth_policy: SendPolicy {
+            keep_groups: args.smooth_keep_groups,
+            max_lag: Duration::from_millis(args.smooth_max_lag_ms),
         },
-        next_conn: AtomicU64::new(1),
     });
 
     let relay_for_web = relay.clone();
@@ -199,8 +208,8 @@ async fn main() -> anyhow::Result<()> {
         let http = args.http;
         let port = http.port();
         tracing::warn!("--dev: GET /api/dev/token mints operator tokens for anyone who can reach port {port}");
-        tracing::info!("operator UI: http://localhost:{port}/?room=robot-01&role=operator");
-        tracing::info!("viewer UI:   http://localhost:{port}/?room=robot-01&role=viewer");
+        tracing::info!("operator UI: http://localhost:{port}/?room=robot-01&preset=operator");
+        tracing::info!("viewer UI:   http://localhost:{port}/?room=robot-01&preset=viewer");
     }
     let tls = args.http_tls.then(|| web::tls_config(&cert)).transpose()?;
     let web_cfg = web::Config {
@@ -269,8 +278,8 @@ async fn handle(relay: Arc<Relay>, req: tq_transport::wt::Request) -> anyhow::Re
         .unwrap_or_default();
     let peer = req.conn().remote_address();
 
-    let (kind, room_id) = match segments.as_slice() {
-        ["v1", kind @ ("publish" | "session"), room] => (*kind, room.to_string()),
+    let room_id = match segments.as_slice() {
+        ["v1", "room", room] if tq_wire::valid_name(room) => room.to_string(),
         _ => {
             req.reject(http::StatusCode::NOT_FOUND).await?;
             anyhow::bail!("{peer}: unknown path {}", url.path());
@@ -283,24 +292,12 @@ async fn handle(relay: Arc<Relay>, req: tq_transport::wt::Request) -> anyhow::Re
             anyhow::bail!("{peer}: {e}");
         }
     };
-    let role_ok = match kind {
-        "publish" => claims.role == Role::Publisher,
-        _ => matches!(claims.role, Role::Operator | Role::Viewer),
-    };
-    if !role_ok || !claims.allows_room(&room_id) {
+    if !claims.allows_room(&room_id) {
         req.reject(http::StatusCode::FORBIDDEN).await?;
-        anyhow::bail!(
-            "{peer}: token for {} {} not valid on {}",
-            claims.role,
-            claims.room,
-            url.path()
-        );
+        anyhow::bail!("{peer}: token for room {} not valid on {}", claims.room, url.path());
     }
 
     let session = req.ok().await?;
     let room = relay.room(&room_id);
-    match kind {
-        "publish" => publisher::run(relay, room, session, claims).await,
-        _ => client::run(relay, room, session, claims).await,
-    }
+    session::run(relay, room, session, claims).await
 }

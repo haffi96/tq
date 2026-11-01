@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use tokio::sync::Mutex;
-use tq_proto::Control;
+use tq_wire::Control;
 use web_transport_quinn::{RecvStream, SendStream};
 
 /// Cloneable writer half of a control stream.

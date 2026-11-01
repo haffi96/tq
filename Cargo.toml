@@ -3,24 +3,28 @@ resolver = "2"
 members = ["crates/*"]
 # tq-app (GPUI) is a large build; `cargo build` without -p skips it.
 default-members = [
+    "crates/tq",
     "crates/tq-media",
-    "crates/tq-proto",
-    "crates/tq-publisher",
+    "crates/tq-wire",
+    "crates/tq-edge",
     "crates/tq-relay",
+    "crates/tq-teleop",
     "crates/tq-tools",
     "crates/tq-transport",
 ]
 
 [workspace.package]
-# Libraries and tools. The released binaries (tq-relay, tq-publisher, tq-app)
+# Libraries and tools. The released binaries (tq-relay, tq-edge, tq-app)
 # carry their own versions.
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [workspace.dependencies]
+tq = { path = "crates/tq" }
 tq-media = { path = "crates/tq-media" }
-tq-proto = { path = "crates/tq-proto" }
+tq-teleop = { path = "crates/tq-teleop" }
+tq-wire = { path = "crates/tq-wire" }
 tq-transport = { path = "crates/tq-transport" }
 
 anyhow = "1"
