@@ -19,6 +19,7 @@ bun dev/bench/bench.ts run --only video-direct,data
 bun dev/bench/bench.ts run --app                  # also tq-app decode→paint (opens a window)
 bun dev/bench/bench.ts run --ref main             # build another ref in a worktree, bench that
 bun dev/bench/bench.ts compare BASE.json NEW.json [--fail]
+bun dev/bench/bench.ts compare NEW.json           # against the committed baseline (last release)
 # against the deployed GCP relay (start the VM first if it is stopped):
 TQ_SHARED_SECRET=$(terraform -chdir=infra/gcp output -raw shared_secret) \
   bun dev/bench/bench.ts run --relay https://tq-relay-1.haffi.dev
@@ -46,6 +47,21 @@ log in the `-logs` directory next to it.
    themselves are wrong; fix that first.
 5. Report the comparison table and the hop that explains any change.
    Say which numbers are from emulated links.
+
+## Quick check against the last release
+
+`bun dev/bench/bench.ts run --quick`, then `compare` with only the new
+result. It uses `dev/bench/baselines/<machine>/<relay>.json`. If there is
+no baseline for this machine, say so and fall back to `--ref <last
+release tag>`, interleaved as above. A flag against a baseline is a
+single-run comparison: confirm it before reporting it as a regression.
+
+## On a release
+
+From a clean checkout of the release commit, make a full run with
+`--app --save-baseline`, and also with `--relay https://tq-relay-1.haffi.dev`
+once the release's relay is deployed (the VM is normally stopped: ask
+before starting it). Commit the baselines with the release.
 
 ## When the code changes under the bench
 

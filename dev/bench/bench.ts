@@ -55,6 +55,10 @@ type Scenario = {
   quick?: boolean;
   /** Not supported by protocol 2.0 builds. */
   v3Only?: boolean;
+  /** tq-app runs beside the probe; only with --app. Kept out of the other
+   * scenarios: its decode shares the hardware with the test encoder and
+   * moves capture→pub by a few ms. */
+  app?: boolean;
 };
 
 const SCENARIOS: Scenario[] = [
@@ -68,12 +72,16 @@ const SCENARIOS: Scenario[] = [
   { name: 'data', what: 'data tracks: latest 50 Hz, stream 100 Hz, datagram 200 Hz, ~200 B JSON', sources: 'none', data: true, secs: 20, quickSecs: 10, kind: 'data', quick: true, v3Only: true },
   { name: 'join', what: 'join to live video: 10 cold joins (edge idle, nobody subscribed), then 10 warm (another viewer already in)', sources: 'pair', secs: 3, quickSecs: 3, kind: 'join', quick: true, v3Only: true },
   { name: 'join-starlink', what: 'join through starlink', sources: 'pair', impair: 'starlink', secs: 3, quickSecs: 3, kind: 'join', v3Only: true },
+  { name: 'app-direct', what: 'video-direct with tq-app (viewer) open: decode, decoded→painted, capture→render', sources: 'pair', secs: 30, quickSecs: 15, kind: 'video', quick: true, app: true },
+  { name: 'app-prodlike', what: 'prodlike-direct with tq-app open', sources: 'prodlike', secs: 30, quickSecs: 15, kind: 'video', app: true },
   { name: 'fanout-10', what: '10 viewer probes on the video-direct stream at once', sources: 'pair', secs: 20, quickSecs: 10, kind: 'fanout', probes: 10 },
 ];
 
 // ---------------------------------------------------------------- processes
 
 const procs: Bun.Subprocess[] = [];
+/** The data feeders' listeners and timers, if a scenario started them. */
+let stopFeeders = () => {};
 function spawn(cmd: string[], opts: { cwd?: string; log?: string; env?: Record<string, string> } = {}) {
   const p = Bun.spawn(cmd, {
     cwd: opts.cwd ?? ROOT,
@@ -85,6 +93,8 @@ function spawn(cmd: string[], opts: { cwd?: string; log?: string; env?: Record<s
   return p;
 }
 async function stopAll() {
+  stopFeeders();
+  stopFeeders = () => {};
   for (const p of procs.splice(0)) p.kill();
   await Bun.sleep(500);
 }
@@ -146,6 +156,8 @@ async function prepareBuild(args: Map<string, string | true>): Promise<Build> {
     const wt = `/tmp/tq-bench-${ref.replace(/[^\w.-]/g, '_')}`;
     commit = (await sh(['git', 'rev-parse', '--short', ref])).trim();
     if (!existsSync(wt)) await sh(['git', 'worktree', 'add', '--detach', wt, ref]);
+    // A moving ref (main) has moved since the worktree was made.
+    else await sh(['git', 'checkout', '-q', '--detach', commit], wt);
     binDir = join(wt, 'target/release');
     console.error(`building ${ref} (${commit}) in ${wt}`);
     await sh(['cargo', 'build', '--release', '-q', '--workspace', '--exclude', 'tq-app'], wt).catch(() =>
@@ -315,7 +327,7 @@ function pick(s: Summary) {
 
 // ---------------------------------------------------------------- run
 
-async function runScenario(s: Scenario, build: Build, secs: number, logDir: string, withApp: boolean) {
+async function runScenario(s: Scenario, build: Build, secs: number, logDir: string) {
   for (const port of [...(REMOTE ? [] : [QUIC, HTTP, IMPAIR]), ...Object.values(SRC), ...Object.values(DATA)]) {
     if (!(await portFree(port))) throw new Error(`port ${port} is busy; stop whatever uses it`);
   }
@@ -333,7 +345,7 @@ async function runScenario(s: Scenario, build: Build, secs: number, logDir: stri
     relayUrl = `https://127.0.0.1:${IMPAIR}`;
   }
   startSources(s, logDir);
-  const stopFeeders = s.data ? startDataFeeders() : () => {};
+  if (s.data) stopFeeders = startDataFeeders();
   await Bun.sleep(s.sources === 'none' ? 500 : 3000);
   const cfgPath = join(logDir, `${s.name}-edge.json`);
   writeFileSync(cfgPath, JSON.stringify(edgeConfig(s, relayUrl, build.legacy), null, 2));
@@ -346,7 +358,7 @@ async function runScenario(s: Scenario, build: Build, secs: number, logDir: stri
   const plog = (i: number | string) => join(logDir, `${s.name}-probe-${i}.log`);
 
   if (s.kind === 'video') {
-    const appRun = withApp ? runApp(build, secs, join(logDir, `${s.name}-app.log`)) : null;
+    const appRun = s.app ? runApp(build, secs, join(logDir, `${s.name}-app.log`)) : null;
     const r = await probe(build, ['--preset', 'operator', '--teleop-hz', '20', ...liveArg(s, build)], secs + (build.legacy ? 0 : WARMUP_SECS), plog(0));
     result.tracks = videoTracks(r);
     result.teleop = {
@@ -412,6 +424,12 @@ async function runScenario(s: Scenario, build: Build, secs: number, logDir: stri
         if (typeof x.rtt_ms === 'number') rtts.push(x.rtt_ms);
       }
     }
+    // The remote stop must always stop the robot: anything but an Ok ack
+    // fails the scenario rather than leaving a latency of the ones that did.
+    const bad = Object.entries(statuses).filter(([status]) => status !== 'Ok');
+    if (bad.length || rtts.length < runs) {
+      throw new Error(`remote stop not acked Ok every time: ${JSON.stringify(statuses)}, ${rtts.length}/${runs} with a round trip`);
+    }
     result.stop_ack_rtt_ms = summarize(rtts);
     result.statuses = statuses;
   } else if (s.kind === 'fanout') {
@@ -440,7 +458,6 @@ async function runScenario(s: Scenario, build: Build, secs: number, logDir: stri
     return c0 != null && c1 != null ? Math.round(((c1 - c0) / elapsed) * 1000) / 10 : null;
   };
   result.cpu_pct = { relay: relay && (await cpu(relay.pid, cpu0.relay)), edge: await cpu(edge.pid, cpu0.edge) };
-  stopFeeders();
   await stopAll();
   return result;
 }
@@ -538,7 +555,7 @@ async function run(args: Map<string, string | true>) {
   const quick = args.has('quick');
   const only = typeof args.get('only') === 'string' ? (args.get('only') as string).split(',') : null;
   const chosen = SCENARIOS.filter((s) => (only ? only.includes(s.name) : !quick || s.quick)).filter(
-    (s) => !(build.legacy && s.v3Only) && !(REMOTE && s.impair),
+    (s) => !(build.legacy && s.v3Only) && !(REMOTE && s.impair) && (!s.app || args.has('app')),
   );
   if (!existsSync(join(STREAMING_TOOLS, 'tools/gstreamer_source'))) throw new Error(`no streaming-tools at ${STREAMING_TOOLS}`);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -567,7 +584,7 @@ async function run(args: Map<string, string | true>) {
     const secs = quick ? s.quickSecs : s.secs;
     console.error(`[${s.name}] ${s.what} (${secs} s)`);
     try {
-      out.scenarios[s.name] = await runScenario(s, build, secs, logDir, args.has('app'));
+      out.scenarios[s.name] = await runScenario(s, build, secs, logDir);
     } catch (e) {
       await stopAll();
       console.error(`[${s.name}] failed: ${e}`);
@@ -660,10 +677,25 @@ function metrics(r: any): Map<string, number> {
   return m;
 }
 
-/** A change is a regression past both a relative and an absolute margin: run-to-run noise is a few ms. */
-function regressed(key: string, base: number, now: number) {
+/**
+ * A change is a regression past both a relative and an absolute margin,
+ * each sized to what the metric does between two runs of the same build
+ * (docs/perf.md, "Noise").
+ */
+function margin(key: string, remote: boolean): { rel: number; abs: number } {
+  // Where in the 1 s GOP a join lands: medians of 10 joins move ~150 ms.
+  if (/ (first_frame|live)_ms /.test(key)) return { rel: 0.5, abs: 250 };
+  // tq-app paints on the display link: 0–16.7 ms of wait per frame.
+  if (/ app .*(painted|render)/.test(key)) return { rel: 0.3, abs: 10 };
   const p95 = key.endsWith('p95');
-  return now - base > Math.max(base * (p95 ? 0.25 : 0.15), p95 ? 5 : 2);
+  // The internet's tail moves more than loopback's.
+  if (p95) return { rel: 0.25, abs: remote ? 10 : 5 };
+  return { rel: 0.15, abs: 3 };
+}
+
+function regressed(key: string, base: number, now: number, remote = false) {
+  const m = margin(key, remote);
+  return now - base > Math.max(base * m.rel, m.abs);
 }
 
 function compare(a: any, b: any): { text: string; regressions: number } {
@@ -677,8 +709,9 @@ function compare(a: any, b: any): { text: string; regressions: number } {
   for (const [k, v] of ma) {
     if (!mb.has(k)) continue;
     const n = mb.get(k)!;
-    const bad = regressed(k, v, n);
-    const better = regressed(k, n, v);
+    const remote = (b.relay ?? 'local') !== 'local';
+    const bad = regressed(k, v, n, remote);
+    const better = regressed(k, n, v, remote);
     regressions += Number(bad);
     lines.push(`| ${k} | ${v} | ${n} | ${n - v > 0 ? '+' : ''}${(n - v).toFixed(1)} | ${bad ? 'REGRESSED' : better ? 'better' : ''} |`);
   }
@@ -690,6 +723,12 @@ function compare(a: any, b: any): { text: string; regressions: number } {
   };
   if (only(mb, ma)) lines.push('', `new only: ${only(mb, ma)}`);
   if (only(ma, mb)) lines.push('', `base only: ${only(ma, mb)}`);
+  for (const [name, s] of Object.entries<any>(b.scenarios ?? {})) {
+    if (s.error && !a.scenarios?.[name]?.error) {
+      regressions++;
+      lines.push('', `**${name} FAILED in new**: ${s.error}`);
+    }
+  }
   lines.push('', `${regressions} regression(s)`);
   return { text: lines.join('\n'), regressions };
 }
@@ -738,8 +777,8 @@ if (cmd === 'run') {
 } else if (cmd === 'report' && pos.length === 1) {
   console.log(report(JSON.parse(readFileSync(pos[0], 'utf8'))));
 } else if (cmd === 'list') {
-  for (const s of SCENARIOS) console.log(`${s.quick ? '*' : ' '} ${s.name.padEnd(22)} ${s.secs}s  ${s.what}`);
-  console.log('\n* in --quick');
+  for (const s of SCENARIOS) console.log(`${s.quick ? '*' : ' '} ${s.name.padEnd(22)} ${s.secs}s  ${s.what}${s.app ? ' [--app]' : ''}`);
+  console.log('\n* in --quick; [--app] only with --app');
 } else {
   console.error('usage: bun dev/bench/bench.ts run [--quick] [--only a,b] [--app] [--ref REF | --bin-dir DIR] [--relay URL] [--save-baseline] [--label L] [--out F]\n       bun dev/bench/bench.ts compare [BASE.json] NEW.json [--fail]\n       bun dev/bench/bench.ts report RESULT.json\n       bun dev/bench/bench.ts list');
   process.exit(2);

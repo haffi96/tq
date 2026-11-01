@@ -50,7 +50,7 @@ timestamps and an IDR every second:
 | `data` | data tracks at once: `latest` 50 Hz, `stream` 100 Hz, `datagram` 200 Hz, about 200 B of JSON each. Rate delivered, edge→probe latency per hop. |
 | `join`, `join-starlink` | subscribe → first frame, and → first *live* frame (capture→probe ≤ 100 ms, 200 ms on Starlink). 10 **cold** joins (nobody subscribed, so tq-edge is not sending) and 10 **warm** ones (another viewer is already in). |
 | `fanout-10` | 10 viewer probes at once; each one's p50 and p95, the lowest fps |
-| `--app` | tq-app (viewer, `--log-stats`) beside the probe in the video scenarios: decode, capture→decoded, decoded→painted, capture→render |
+| `app-direct`, `app-prodlike` (only with `--app`) | the direct video scenarios with tq-app (viewer, `--log-stats`) open beside the probe: decode, capture→decoded, decoded→painted, capture→render. Separate scenarios because the app's decode shares VideoToolbox with the test encoder, which moves capture→pub by 2–4 ms; the other scenarios run without it. |
 
 Every scenario also records the CPU the relay and tq-edge used.
 
@@ -88,12 +88,55 @@ the claimed bound (half the best round trip) covers that by construction.
 ## Comparing
 
 `compare` lines up every latency metric (p50 and p95) of two results.
-It marks a metric REGRESSED when it got worse by more than both:
-- p50: 15% and 2 ms;
-- p95: 25% and 5 ms.
+It marks a metric REGRESSED when it got worse by more than both a
+relative and an absolute margin. Each margin is sized to how much that
+metric moves between two runs of the same build:
+
+| Metrics | Margin |
+| --- | --- |
+| p50 | 15% and 3 ms |
+| p95 | 25% and 5 ms (10 ms through a deployed relay) |
+| tq-app decoded→painted, capture→render | 30% and 10 ms (the wait for the display link is 0–16.7 ms) |
+| join first frame and live | 50% and 250 ms (where the join lands in the 1 s GOP) |
+
+With these margins, 13 pairs of same-build runs from 2026-11-01 (local,
+emulated Starlink, GCP, with and without tq-app) flag nothing, while a 3 ms
+change in direct video p50 is flagged. Joins only catch large changes,
+such as a lost cache replay.
 
 `--fail` exits 1 if anything regressed. Only compare results from the
 same machine.
+
+### Baselines
+
+`dev/bench/baselines/<machine>/<relay>.json` holds one committed result
+per machine (hardware model, never the host name) and relay (`local`,
+or the relay's host name). Make one on each release, from a clean
+checkout of the release commit, with a full run:
+
+```bash
+bun dev/bench/bench.ts run --app --save-baseline
+TQ_SHARED_SECRET=... bun dev/bench/bench.ts run --relay https://tq-relay-1.haffi.dev --app --save-baseline
+```
+
+That replaces the file. Its `commit` says which release it is, and git
+history keeps the earlier ones. To check a change against the last
+release, run the bench and give `compare` only the new result:
+
+```bash
+bun dev/bench/bench.ts run --quick
+bun dev/bench/bench.ts compare target/bench/<new>.json
+```
+
+`compare` picks the baseline for the result's machine and relay.
+Metrics the new run did not measure (the rest of the full suite in a
+`--quick` run, or tq-app without `--app`) are listed as base-only, not
+compared. A baseline is a single run, so if something is flagged, run it
+again and bench the release itself (`--ref <tag>`) before believing it.
+
+`--ref` takes any commit, branch or tag that has the bench, i.e. from
+this change on. Older commits are not supported, apart from protocol 2.0
+(below).
 
 ### Noise
 
@@ -106,8 +149,9 @@ MacBook Air:
 - join times depend on where in the 1 s GOP the join lands, so they
   spread over 0–1000 ms; compare medians over many joins.
 
-So bench the base and the change interleaved (base, change, base, change)
-for at least two rounds, and trust only differences that repeat.
+So when a change matters, bench the base and the change interleaved
+(base, change, base, change) for at least two rounds, and trust only
+differences that repeat.
 
 ### Against a deployed relay (`--relay`)
 
